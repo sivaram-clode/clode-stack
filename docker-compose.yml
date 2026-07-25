@@ -1562,7 +1562,7 @@ services:
   # ------------------------------------------------------------------
   ec2mock:
     build:
-      context: ${EC2MOCK_DIR:-../ec2-docker-mock}
+      context: ${EC2MOCK_DIR:-./docker/ec2-docker-mock}
     # --pull-policy=Never: the images this mock spawns live under a
     # local-only namespace (clode-stack/*), so hitting Docker Hub for
     # them would 401. Build them locally with `./stack.sh up --agent`
