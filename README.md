@@ -11,7 +11,11 @@ compose, env, and seed data live.
 # 2. Clone every required sibling repo into the same parent dir as clode-stack.
 # 3. Drop your Cloudflare tunnel creds into ~/.cloudflared/  (see "Cloudflared" below).
 # 4. Put provider tokens in ../mang-proxy/.env  (CLAUDE_CODE_OAUTH_TOKEN, etc.).
-# 5. Bring it up.
+# 5. Generate raksha's JWT signing keys (see "Raksha JWT keys" below).
+mkdir -p keys/raksha
+openssl genrsa -out keys/raksha/raksha-private.pem 2048
+openssl rsa -in keys/raksha/raksha-private.pem -pubout -out keys/raksha/raksha.pub
+# 6. Bring it up.
 ./stack.sh up
 ```
 
@@ -56,6 +60,27 @@ parent/
 
 Each repo must carry its own `.env` (or `.env.example` for cha-ching). The
 compose layers stack-topology overrides on top.
+
+## Raksha JWT keys
+
+raksha signs session JWTs with an RSA keypair mounted read-only at
+`keys/raksha/` (→ `/app/keys` in the container, per `../raksha/.env`'s
+`JWT_PRIVATE_KEY_PATH` / `JWT_PUBLIC_KEY_PATH`). These are **not** committed
+(`keys/` is gitignored), so generate them once per checkout before the first
+`up`:
+
+```bash
+mkdir -p keys/raksha
+# Private key — PKCS#1 ("BEGIN RSA PRIVATE KEY"), what raksha's loader expects.
+openssl genrsa -out keys/raksha/raksha-private.pem 2048
+# Public key — PKIX ("BEGIN PUBLIC KEY").
+openssl rsa -in keys/raksha/raksha-private.pem -pubout -out keys/raksha/raksha.pub
+```
+
+The pair survives `./stack.sh wipe` and `cleanup` (host-side, mounted `:ro`) —
+raksha reuses the same `kid`/JWKS across restarts and only regenerates when a
+file is missing. Deleting them and re-running the commands rotates the keys
+(invalidates every existing token).
 
 ## Services
 
