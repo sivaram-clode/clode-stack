@@ -1,0 +1,41 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Mock {{.Provider}} Sign-in</title>
+  <style>
+    body { font-family: system-ui, Arial, sans-serif; background: #f6f8fc; margin: 0; }
+    .card { max-width: 420px; margin: 8vh auto; background: #fff; border: 1px solid #dadce0;
+            border-radius: 12px; padding: 32px; }
+    h1 { font-size: 20px; font-weight: 500; margin: 0 0 4px; text-transform: capitalize; }
+    p.sub { color: #5f6368; font-size: 13px; margin: 0 0 24px; }
+    label { display: block; font-size: 12px; color: #5f6368; margin: 14px 0 4px; }
+    input[type=email] { width: 100%; box-sizing: border-box; padding: 10px;
+                        border: 1px solid #dadce0; border-radius: 6px; font-size: 14px; }
+    .actions { display: flex; justify-content: space-between; margin-top: 28px; }
+    button { border: 0; border-radius: 6px; padding: 10px 22px; font-size: 14px; cursor: pointer; }
+    #approve { background: #1a73e8; color: #fff; }
+    #deny { background: transparent; color: #1a73e8; }
+    code { background: #f1f3f4; padding: 1px 5px; border-radius: 4px; font-size: 11px; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Mock {{.Provider}} Sign-in</h1>
+    <p class="sub">Test double for the {{.Provider}} consent screen. Enter the
+      email raksha should receive, then Approve.</p>
+    <form id="consent-form" method="post" action="{{.Action}}">
+      <input type="hidden" name="redirect_uri" value="{{.RedirectURI}}">
+      <input type="hidden" name="state" value="{{.State}}">
+      <label for="email">Email</label>
+      <input type="email" id="email" name="email" value="{{.Email}}" autofocus>
+      <p class="sub" style="margin: 8px 0 0">Name, id, and avatar are derived from
+        this email — email is the only thing raksha needs.</p>
+      <div class="actions">
+        <button type="submit" id="deny" name="action" value="deny">Deny</button>
+        <button type="submit" id="approve" name="action" value="approve">Approve</button>
+      </div>
+    </form>
+  </div>
+</body>
+</html>

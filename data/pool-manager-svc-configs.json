@@ -1,0 +1,107 @@
+{
+  "_source": "metabase DB 12 (pool_manager) → clode.svc_configs WHERE service_type='kairo'",
+  "_extracted_at": "2026-06-06",
+  "_notes": [
+    "settings.publicNet, settings.volumeMounts and settings.workspaceSize are k8s-only — the local DockerDeployer ignores them, so the row is the production blob verbatim with the understanding that some keys are no-ops locally.",
+    "hot_count / cold_count / max_concurrent_deployments are written to svc_configs verbatim by seed.sh. Currently 2/2/2 — matches production. Lower to 1/1/1 if you want a leaner local pool.",
+    "config_hash is left blank — pool-manager recomputes it on next reconcile.",
+    "configs is an array — seed.sh iterates and upserts each row. 'kairo-ephemeral' is the per-application ephemeral profile; same blob minus volumeMounts/workspaceSize (no PVC, see jumbo migration 000035)."
+  ],
+  "configs": [
+    {
+      "service_type": "kairo",
+      "settings": {
+        "cpu": 3.5,
+        "image": "clode-stack/benji:latest",
+        "memory": 12,
+        "publicNet": true,
+        "runAsRoot": true,
+        "healthChecks": [
+          {
+            "port": 18800,
+            "periodSeconds": 30,
+            "initialDelaySeconds": 30
+          }
+        ],
+        "volumeMounts": [
+          {
+            "name": "kairo-data",
+            "size": "20Gi",
+            "mountPath": "/dev/kairo-data",
+            "devicePath": "/dev/kairo-data",
+            "multiMount": {
+              "node-home": "/home/node",
+              "docker-storage": "/var/lib/docker"
+            },
+            "blockDevice": true,
+            "retainOnDelete": true,
+            "storageClassName": "gp3-csi"
+          }
+        ],
+        "containerPort": 8000,
+        "restartPolicy": "Always",
+        "workspaceSize": "20Gi",
+        "imagePullPolicy": "IfNotPresent"
+      },
+      "vars": [
+        {"key": "HOME",               "value": "/home/node"},
+        {"key": "TERM",               "value": "xterm-256color"},
+        {"key": "KAIRO_ENABLED",      "value": "1"},
+        {"key": "GATEWAY_TYPE",       "value": "benji"},
+        {"key": "BENJI_GRPC_HOST",    "value": "127.0.0.1"},
+        {"key": "BENJI_GRPC_PORT",    "value": "50051"},
+        {"key": "BENJI_HOME",         "value": "/home/node/.benji"},
+        {"key": "LOG_LEVEL",          "value": "debug"},
+        {"key": "KAIRO_DATA_DIR",     "value": "/home/node/.benji/.kairo"},
+        {"key": "MCPORTER_CONFIG",    "value": "/home/node/.benji/mcporter.json"},
+        {"key": "KAIRO_LISTEN_ADDR",  "value": ":18800"},
+        {"key": "BROKER_ADDR",        "value": "louie:8600"},
+        {"key": "AGENT_STATE_S3_ENABLED", "value": "true"}
+      ],
+      "hot_count": 1,
+      "cold_count": 1,
+      "max_concurrent_deployments": 2,
+      "enabled": true
+    },
+    {
+      "service_type": "kairo-ephemeral",
+      "settings": {
+        "cpu": 3.5,
+        "image": "clode-stack/benji:latest",
+        "memory": 12,
+        "publicNet": true,
+        "runAsRoot": true,
+        "healthChecks": [
+          {
+            "port": 18800,
+            "periodSeconds": 30,
+            "initialDelaySeconds": 30
+          }
+        ],
+        "volumeMounts": [],
+        "containerPort": 8000,
+        "restartPolicy": "Always",
+        "imagePullPolicy": "IfNotPresent"
+      },
+      "vars": [
+        {"key": "HOME",               "value": "/home/node"},
+        {"key": "TERM",               "value": "xterm-256color"},
+        {"key": "KAIRO_ENABLED",      "value": "1"},
+        {"key": "GATEWAY_TYPE",       "value": "benji"},
+        {"key": "BENJI_GRPC_HOST",    "value": "127.0.0.1"},
+        {"key": "BENJI_GRPC_PORT",    "value": "50051"},
+        {"key": "BENJI_HOME",         "value": "/home/node/.benji"},
+        {"key": "LOG_LEVEL",          "value": "debug"},
+        {"key": "KAIRO_DATA_DIR",     "value": "/home/node/.benji/.kairo"},
+        {"key": "MCPORTER_CONFIG",    "value": "/home/node/.benji/mcporter.json"},
+        {"key": "KAIRO_LISTEN_ADDR",  "value": ":18800"},
+        {"key": "BROKER_ADDR",        "value": "louie:8600"},
+        {"key": "AGENT_STATE_S3_ENABLED", "value": "true"}
+      ],
+      "hot_count": 1,
+      "cold_count": 1,
+      "max_concurrent_deployments": 2,
+      "enabled": true
+    }
+  ]
+}

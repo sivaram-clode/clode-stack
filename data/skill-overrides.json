@@ -1,0 +1,30 @@
+{
+  "_comment": "Column overrides applied on top of SKILL.md frontmatter when seeding skills-registry from ../aramb-skills. Top-level _repo and _defaults set whole-import values. `skills` keys override per slug. Top up `skills.<slug>.category`/`.tags` from the dev DB via /metabase (skills_registry id 10): SELECT slug, category, tags FROM clode.skills WHERE repo_id='clode-labs/aramb-skills' ORDER BY slug",
+  "_repo": {
+    "id": "clode-labs/aramb-skills",
+    "owner": "clode-labs",
+    "name": "aramb-skills",
+    "url": "https://github.com/clode-labs/aramb-skills",
+    "license": null,
+    "owner_name": "clode-labs",
+    "owner_url": "https://github.com/clode-labs",
+    "owner_avatar_url": "https://avatars.githubusercontent.com/u/211380579?v=4",
+    "skills_path": ""
+  },
+  "_defaults": {
+    "owner_id": "6267de96-2692-5fee-bedb-61e924f8e62e",
+    "author_name": "clode-labs",
+    "author_slug": "clode-labs",
+    "author_url": "https://github.com/clode-labs",
+    "author_avatar_url": "https://avatars.githubusercontent.com/u/211380579?v=4",
+    "status": "approved",
+    "source_type": "github",
+    "source_url_template": "https://github.com/clode-labs/aramb-skills/tree/main/{slug}"
+  },
+  "skills": {
+    "aramb-browser":    {"category": "automation",              "tags": ["automation", "web-scraping", "testing", "tooling"]},
+    "aramb-deployment": {"category": "cloud-infrastructure",    "tags": ["orchestration", "automation", "tooling", "cloud-infrastructure"]},
+    "aramb-expose":     {"category": "tooling",                 "tags": ["tooling", "backend", "web-development", "workflow"]},
+    "aramb-metadata":   {"category": "configuration-management","tags": ["configuration-management", "orchestration", "automation", "code-analysis", "tooling"]}
+  }
+}

@@ -1,0 +1,1691 @@
+# clode-stack — local docker-compose for the whole platform.
+#
+# Sibling service directories (`../<name>`) are the build contexts:
+#   raksha  jumbo  brahmi  pool-manager  chil  cha-ching
+#   toolkit-proxy  mang-proxy  skills-registry  aramb-gateway
+#
+# Each service runs `<binary> migrate && exec <binary> serve` so migrations
+# apply on every container start (idempotent). Service-specific env lives in
+# the sibling `.env` (cha-ching uses `.env.example` — it has no `.env`).
+# Cross-service URLs, DB connection, admin/pool-owner identity, etc. are
+# centralised in the YAML anchors below — edit one anchor, all services
+# inherit.
+#
+# Auth issuer is uniform: `http://raksha:8080`. Raksha's JWT_ISSUER matches
+# the OIDC discovery URL every other service uses, so JWKS resolves cleanly.
+#
+# Pool-manager runs in LOCAL_MODE so it spawns kairo agents via `docker run`
+# (mount of the host docker socket). DOCKER_NETWORK pins those agents to
+# the same `clode` bridge defined at the bottom of this file — `name: clode`
+# disables the compose project-prefix so the literal "clode" matches what
+# pool-manager passes to `docker run --network`.
+#
+# SEEDING IS EXTERNAL. The compose USED to host per-service seed sidecars
+# (pool-owner-seed, pool-manager-seed). Those were replaced by `seed.sh`
+# — one shell script run from `up.sh` after `docker compose up -d`. It
+# does ALL post-boot setup in order:
+#   1. raksha admin user + service account
+#   2. jumbo project + application + draft canvas
+#   3. pool-manager kairo svc_configs row
+#   4. mang-proxy platform-key load (CLAUDE_CODE_OAUTH_TOKEN from host env)
+#   5. skills-registry: import clode-labs/aramb-skills + workflow templates
+# Idempotent — re-running is a no-op once seeded.
+
+# ----------------------------------------------------------------------
+# Cross-cutting conventions (repeated across services — documented once)
+#
+# Ingress. traefik is the single HTTP entry point for the stack — host
+# port 8080, Host-header routing via docker-provider labels on each
+# service: `<svc>.localhost:8080` locally, `<svc>.srclode.online` when
+# the CF tunnel fronts it (`--public`). Every URL a browser, agent, or
+# external party consumes uses one of those two grammars; service↔service
+# traffic stays on plain docker DNS (`http://<svc>:<port>`, the
+# x-service-urls anchor).
+#
+# S3 endpoints. Consumers whose presigned URLs leave the container
+# (brahmi attachments, intervix recordings) sign against the traefik
+# hostname: `${STACK_SCHEME:-http}://minio.${STACK_DOMAIN:-localhost}`
+# `${STACK_PORT-:8080}`. SigV4 signs the Host header, so the same URL
+# must be valid from the host and in-network — traefik's network aliases
+# (minio.localhost + minio.srclode.online on the `clode` bridge) make the
+# signer's dial and the browser's fetch hit the same origin. Backends
+# whose blobs never leave the network (databend, vova audio, ikki context
+# tarballs) use `http://minio:9000` direct. The old minio-proxy nginx is
+# gone: its one job (restoring the CF-edge-mangled Accept-Encoding header
+# that breaks aws-sdk-go-v2 SigV4) is now the `ae-identity` traefik
+# middleware on the minio router. Full history: CLAUDE.md's Cloudflare
+# gotcha.
+#
+# ENVIRONMENT=local. Every service on glafa rc33+ must set it — the
+# secret loader rejects plain-text DB_PASSWORD outside `local`/`dev`.
+# Some sibling `.env` files pin it, some don't; when they don't, this
+# compose sets it explicitly on the service. Boot-time crash telling
+# you to set this = a new glafa rc33+ sibling without it.
+#
+# Host port publishing. HTTP is never published per-service — it all
+# flows through traefik on 8080 (`<svc>.localhost:8080`). Only non-HTTP
+# wire protocols keep direct host ports, using the `1<original>` prefix:
+# postgres 15432, redis 16379, databend 13307/18000. Exception: louie's
+# gRPC broker stays at 8600 (h2c, dialed by host-side louie clients).
+#
+# ----------------------------------------------------------------------
+
+# ----------------------------------------------------------------------
+# Shared env anchors — merged into each service's `environment:` via
+# `<<: [*db, *urls, ...]`. Adds noise-free per-service overrides on top.
+# ----------------------------------------------------------------------
+
+x-db-common: &db-common
+  DB_HOST: db
+  DB_PORT: 5432
+  DB_USER: postgres
+  DB_PASSWORD: postgres
+  DB_SSL_MODE: disable
+
+# Shared redis. Password is mandatory because mang-proxy hard-fails on an
+# empty REDIS_PASSWORD; the other consumers (raksha, brahmi) treat it as
+# optional and pick it up via this anchor. Logical DB separation keeps
+# mang-proxy's encrypted platform-key rows on DB 1 so cleanup.sh can flush
+# them independently of raksha tokens / brahmi routing (DB 0).
+x-redis-common: &redis-common
+  REDIS_ADDR: redis:6379
+  REDIS_PASSWORD: clode-redis-local
+
+x-databend-common: &databend-common
+  DATABEND_HOST:     databend
+  DATABEND_PORT:     "8000"
+  DATABEND_USER:     databend
+  DATABEND_PASSWORD: databend
+
+# Cross-service base URLs. Each consumer reads the subset it cares about;
+# `BRAHMI_URL` vs `BRAHMI_BASE_URL` etc. — different services chose
+# different env names, so we set both.
+x-service-urls: &service-urls
+  AUTH_ISSUER:                http://raksha:8080
+  RAKSHA_BASE_URL:            http://raksha:8080
+  # aramb-gateway's name for the same target (its config.go requires it).
+  RAKSHA_INTERNAL_URL:        http://raksha:8080
+  JUMBO_BASE_URL:             http://jumbo:8080
+  JUMBO_URL:                  http://jumbo:8080
+  JUMBO_EXTERNAL_URL:         http://jumbo:8080
+  # cha-ching's name for the same target (cloud-quota pushes to jumbo's
+  # /internal surface; unset = client nil = "jumbo client not wired").
+  JUMBO_INTERNAL_URL:         http://jumbo:8080
+  BRAHMI_URL:                 http://brahmi:9000
+  BRAHMI_BASE_URL:            http://brahmi:9000
+  BRAHMI_WS_URL:              ws://brahmi:9000
+  POOL_MANAGER_URL:           http://pool-manager:8080
+  CHACHING_URL:               http://cha-ching:8086
+  # mang-proxy's name for the same target (usage-ledger POST /api/v1/usage-events
+  # /batch). Empty = the whole usageq pipeline is disabled (no queue, no workers,
+  # no enqueue); set it to turn the ledger on. Auth for the post comes from the
+  # CHA_CHING_ADMIN_* pair in *admin-ids (raksha-minted SA token).
+  CHA_CHING_URL:              http://cha-ching:8086
+  MANG_PROXY_URL:             http://mang-proxy:8080
+  MANG_PROXY_BASE_URL:        http://mang-proxy:8080
+  MANG_PROXY_EXTERNAL_URL:    http://mang-proxy:8080
+  TOOLKIT_PROXY_BASE_URL:     http://toolkit-proxy:8080/cli
+  TOOLKIT_PROXY_EXTERNAL_URL: http://toolkit-proxy:8080/cli
+  CHIL_BASE_URL:              http://chil:8080
+  CHIL_MCP_URL:               http://chil:8080/api/v1/mcp
+  CHIL_MCP_EXTERNAL_URL:      http://chil:8080/api/v1/mcp
+  SKILLS_REGISTRY_URL:        http://skills-registry:8080
+  SKILLS_REGISTRY_BASE_URL:   http://skills-registry:8080
+  GITANA_URL:                 http://gitana:8080
+  # toolkit-proxy reads GITANA_BASE_URL to route the github toolkit through
+  # gitana (user-OAuth flow + credential broker) instead of Composio. Same
+  # docker-DNS target as GITANA_URL — separate env var because toolkit-proxy's
+  # config (internal/config/user_demo_config.go) looks for this exact name.
+  GITANA_BASE_URL:            http://gitana:8080
+  IKKI_API_URL:               http://ikki:7602
+  INTERVIX_URL:               http://intervix:8080
+  INTERVIX_BASE_URL:          http://intervix:8080
+  NOTIFY_URL:                 http://notify:8080
+  NOTIFY_BASE_URL:            http://notify:8080
+
+# ----------------------------------------------------------------------
+# Admin / pool-owner identity. ONE UUID drives every "who owns the
+# pool / who is admin" reference across the stack:
+#   - pool-manager   → POOL_OWNER_ID / POOL_ORG_ID (pool agent owner)
+#   - brahmi         → POOL_OWNER_ID / POOL_PROJECT_ID / POOL_APPLICATION_ID
+#   - mang-proxy     → ADMIN_USER_IDS  (JWT user.id allowlist, /api/v1/admin/*)
+#   - ikki           → ADMIN_USER_IDS  (JWT user.id allowlist, admin usage reads)
+#   - cha-ching      → ADMIN_ORG_IDS   (JWT organization_id allowlist,
+#                      /api/v1/admin/* + org intake + usage-events — the
+#                      org-pivot gate; cha-ching no longer reads ADMIN_USER_IDS)
+#   - skills-registry→ ADMIN_ORG_ID    (single JWT organization_id gate for
+#                      workflow-template writes)
+# Rotate the UUID as a unit — seed.sh also reads it as the JWT `sub` it
+# mints from raksha for admin API calls (skills-registry import + workflow
+# template POSTs), and seeds/raksha-seed.sql plants the matching
+# users/organizations/org_members/service_accounts rows at raksha image
+# build time (migrations can't read env vars — keep the UUIDs literal
+# there too).
+# POOL_PROJECT_ID / POOL_APPLICATION_ID are pool-specific but stay grouped
+# here so the three pool identifiers move together.
+# The NOTIFY_* / CHACHING_* pairs below are separate bot identities — see
+# the block comment inside the anchor.
+# ----------------------------------------------------------------------
+x-admin-ids: &admin-ids
+  ADMIN_USER_ID:          "b2290247-c2af-44c0-9b2d-1e5c5a6a4894"
+  # user.id allowlist (mang-proxy, ikki): the seeded admin PLUS the
+  # raksha-chaching bot — cha-ching's outbound SA tokens (cap pushes to
+  # mang-proxy, usage reads from ikki) are caller-attributed to
+  # CHACHING_ADMIN_USER_ID, so its id must pass the user.id gate.
+  ADMIN_USER_IDS:         "b2290247-c2af-44c0-9b2d-1e5c5a6a4894,0d44278f-d900-4b9d-bdc2-a8a64e91d422"
+  # organization_id gates (org-pivot). skills-registry takes exactly one
+  # org (ADMIN_ORG_ID); cha-ching takes a CSV allowlist (ADMIN_ORG_IDS)
+  # that must contain CHACHING_ADMIN_ORG_ID — raksha's org-intake /
+  # merge / reconciler tokens carry organization_id = that org — plus
+  # the admin org for dev-JWT / manual admin calls.
+  ADMIN_ORG_ID:           "b2290247-c2af-44c0-9b2d-1e5c5a6a4894"
+  ADMIN_ORG_IDS:          "b2290247-c2af-44c0-9b2d-1e5c5a6a4894,0d44278f-d900-4b9d-bdc2-a8a64e91d422"
+  POOL_OWNER_ID:          "b2290247-c2af-44c0-9b2d-1e5c5a6a4894"
+  POOL_PROJECT_ID:        "e26e56c1-7fd0-458c-a611-584d174651ef"
+  POOL_APPLICATION_ID:    "ad6e3042-9ec5-4e6f-81e6-b49b2c96b43c"
+  # Raksha service-account identities. For each upstream raksha talks to
+  # (notify / cha-ching / …), raksha needs an (ORG_ID, USER_ID) pair so
+  # the SA token it mints has an `organization_id` claim the target can
+  # attribute (notify's `emails.created_by`, cha-ching's admin allowlist,
+  # etc.) AND a valid `sub` that resolves to a raksha `users` row.
+  #
+  # Convention: `USER_ID == ORG_ID` for these bot identities — seed.sh
+  # creates a users row and an organizations row with the same UUID and
+  # links them via org_members(owner). Raksha at boot validates the user
+  # exists (raksha/cmd/main.go:294,365); missing = fatal, crashloop.
+  # Add a new pair here whenever raksha grows a new upstream client.
+  NOTIFY_ADMIN_ORG_ID:    "2e93b5aa-1c4d-4f70-8e1a-9b3c5d7f2e4c"
+  NOTIFY_ADMIN_USER_ID:   "2e93b5aa-1c4d-4f70-8e1a-9b3c5d7f2e4c"
+  CHACHING_ADMIN_ORG_ID:  "0d44278f-d900-4b9d-bdc2-a8a64e91d422"
+  CHACHING_ADMIN_USER_ID: "0d44278f-d900-4b9d-bdc2-a8a64e91d422"
+  # mang-proxy's env names for the same chaching bot identity: it mints a
+  # raksha SA token for (org, member) to authenticate its usage-ledger POSTs.
+  # The org must be in cha-ching's ADMIN_ORG_IDS allowlist above — reuse the
+  # already-whitelisted chaching bot org so ingest isn't rejected.
+  CHA_CHING_ADMIN_ORG_ID:    "0d44278f-d900-4b9d-bdc2-a8a64e91d422"
+  CHA_CHING_ADMIN_MEMBER_ID: "0d44278f-d900-4b9d-bdc2-a8a64e91d422"
+
+# CORS — Glafa / raksha middleware reads each entry as a URL and stores
+# `url.Parse(entry).Hostname()` in the allow-set, then does exact-host
+# match AND suffix-match against `.<host>`. Each entry MUST carry a scheme
+# — `url.Parse("srclode.online")` yields an empty hostname (the bare
+# string lands in URL.Path), so it would never match.
+#
+# With `https://srclode.online` in the list, Hostname() == "srclode.online",
+# which then suffix-matches every `*.srclode.online` subdomain.
+x-allowed-origins: &allowed-origins
+  ALLOWED_ORIGINS: "http://localhost:3000,http://localhost:3001,http://localhost:5173,http://localhost:8080,https://srclode.online,https://clode.space"
+
+# aramb-vm knobs routed through ec2mock. Merged into both brahmi pods so
+# either can process a cloud-provision request via the VM path. AWS creds
+# are dummies — the mock ignores signatures — but the SDK's credential
+# chain still needs *something* to resolve. AGENT_VM_AMI_ID is a
+# placeholder because the mock's admin-configured default_image (seeded
+# from data/pool-manager-svc-configs.json in scripts/seed.sh) overrides
+# whatever brahmi passes in RunInstances.ImageId. AGENT_VM_IMAGE must be
+# non-empty (brahmi's vmProvisioner refuses to launch otherwise); the
+# string here is the same one the seeder pushes to the mock so the two
+# stay lockstep — if you change one, change the JSON.
+x-arambvm: &arambvm
+  # Provider default is the VM path (aramb-vm via ec2mock). up.sh's
+  # `--agent` flag additionally builds the full benji image locally
+  # (../benji/Dockerfile target benji) and sets BENJI_IMAGE so
+  # AGENT_VM_IMAGE resolves to the just-built tag; without `--agent`,
+  # AGENT_VM_IMAGE stays at `clode-stack/benji:latest` which the VM launch
+  # will try to pull if it isn't present locally. Set AGENT_PROVIDER=aramb
+  # in the environment to override back to the pool path.
+  AGENT_PROVIDER:              ${AGENT_PROVIDER:-aramb-vm}
+  AGENT_VM_REGION:             us-east-1
+  AGENT_VM_CLODE_ENV:          local
+  AGENT_VM_AMI_ID:             ami-mock-benji
+  AGENT_VM_SPOT_ENABLED:       "false"
+  AGENT_VM_IMAGE:              ${BENJI_IMAGE:-clode-stack/benji:latest}
+  AGENT_VM_CALLHOME_SECRET:    ec2mock-local-callhome-secret
+  # ../brahmi/.env sets POOL_EXTERNAL=true which routes every inbound
+  # GatewayWS through pool-manager's /verify-service. That path is wrong
+  # for VM agents (their identity is the HS256 call-home token brahmi
+  # signed itself with AGENT_VM_CALLHOME_SECRET). Turn it off so the VM
+  # handshake uses CallHomeSigner alone and doesn't try to reach
+  # pool-manager, which lives behind the `pool` profile here.
+  POOL_EXTERNAL:               "true"
+  AGENT_VM_POOL_ENABLED:       "true"
+  AGENT_VM_POOL_DESIRED_SIZE:  "2"
+  AWS_ENDPOINT_URL_EC2:        http://ec2mock:8080
+  AWS_ACCESS_KEY_ID:           test
+  AWS_SECRET_ACCESS_KEY:       test
+  AWS_REGION:                  us-east-1
+  # Louie broker addr — propagated by repository.AgentEnv() into VM cloud-init
+  # /etc/clode-agent/agent.env as BROKER_ADDR (the name aramb-cli's resolver
+  # reads). Matches pool-manager svc_configs.vars for the pod path; the same
+  # value works because both substrates share the `clode` bridge and dial
+  # louie:8600 in-network. Named LOUIE_BROKER_ADDR on the brahmi side so a
+  # config listing / env dump makes it obvious what it points at.
+  LOUIE_BROKER_ADDR:           louie:8600
+
+# Explicit project name — overrides the directory-derived default
+# (`clode-stack`) so containers land as `clode-<svc>-1` (matching the
+# `clode` bridge network below) instead of `clode-stack-<svc>-1`.
+name: clode
+
+services:
+  # ------------------------------------------------------------------
+  # Infrastructure
+  # ------------------------------------------------------------------
+
+  # traefik — the stack's single HTTP entry point (host 8080). Routes by
+  # Host header from per-service docker labels, so routes appear and
+  # disappear with the containers themselves — profiles included, no
+  # separate ingress config to maintain.
+  #
+  # Two Host families per router: `<svc>.localhost` (resolves to loopback
+  # on the host for free — systemd-resolved / browsers synthesize
+  # *.localhost per RFC 6761) and `<svc>.srclode.online` (only reachable
+  # when the cloudflared `public` profile is up; its single ingress rule
+  # forwards *.srclode.online here). Services never exposed through CF
+  # historically (ec2mock, ikki, minio-console, traefik dashboard) get a
+  # `.localhost` rule ONLY — do not add srclode rules to them, that would
+  # publish unauthenticated admin surfaces in --public mode.
+  #
+  # network aliases: containers can't resolve *.localhost to the host, so
+  # the names that containers themselves dial (S3 signing hosts, OAuth
+  # token endpoints, agent callbacks, CDP URLs) are aliased to this
+  # container on the `clode` bridge — one URL string valid from both
+  # sides of the docker boundary. The srclode twins are aliased too so in
+  # --public mode container-side calls short-circuit in-network (correct
+  # signed Host, no CF edge round-trip). Add an alias whenever a NEW
+  # env value hands a `<svc>.{localhost|srclode.online}` URL to a
+  # container-side consumer.
+  #
+  # ae-identity middleware: CF's edge rewrites Accept-Encoding, which
+  # breaks aws-sdk-go-v2 SigV4 (it signs that header). Pinning identity
+  # on the minio router replaces the old minio-proxy nginx shim. See
+  # CLAUDE.md's Cloudflare gotcha for the full story.
+  traefik:
+    # ≥3.7 required: older builds pin docker API 1.24, which modern
+    # dockerd (min 1.40) rejects — the provider then loops "client
+    # version 1.24 is too old" and zero routes appear. DOCKER_API_VERSION
+    # is belt-and-braces for builds that honor it.
+    image: traefik:v3.7
+    environment:
+      DOCKER_API_VERSION: "1.44"
+    command:
+      - --providers.docker=true
+      - --providers.docker.exposedbydefault=false
+      - --providers.docker.network=clode
+      - --entrypoints.web.address=:8080
+      - --api.dashboard=true
+      # ping serves the healthcheck; pin it to the web entrypoint —
+      # bare --ping=true auto-creates the default `traefik` entrypoint
+      # on :8080, which collides with web.
+      - --ping=true
+      - --ping.entrypoint=web
+      - --log.level=INFO
+    ports:
+      - "8080:8080"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    labels:
+      - traefik.enable=true
+      # dashboard — http://traefik.localhost:8080 (local-only, no srclode rule)
+      - traefik.http.routers.traefik-dashboard.rule=Host(`traefik.localhost`)
+      - traefik.http.routers.traefik-dashboard.service=api@internal
+    networks:
+      clode:
+        aliases:
+          # container-dialed hostnames (see comment above)
+          - minio.localhost
+          - minio.srclode.online
+          - raksha.localhost
+          - raksha.srclode.online
+          # oauth-mock: raksha (container) dials the token/userinfo endpoints
+          # AND the CDP browser hits the consent screen — one URL for both.
+          - oauth-mock.localhost
+          - intervix.localhost
+          - intervix.srclode.online
+          - ikki.localhost
+          - ec2mock.localhost
+    healthcheck:
+      test: ["CMD", "traefik", "healthcheck", "--ping"]
+      interval: 30s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    restart: unless-stopped
+
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+    ports:
+      - "15432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./db/init-multiple-dbs.sql:/docker-entrypoint-initdb.d/init-multiple-dbs.sql:ro
+    networks: [clode]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 60s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--requirepass", "clode-redis-local"]
+    ports:
+      - "16379:6379"
+    volumes:
+      - redis_data:/data
+    networks: [clode]
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "clode-redis-local", "ping"]
+      interval: 60s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  minio:
+    image: minio/minio:latest
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    command: ["server", "/data", "--console-address", ":9001"]
+    volumes:
+      - minio_data:/data
+    # No host ports — S3 API and console route through traefik. Desktop
+    # tools: `mc alias set local http://minio.localhost:8080 minioadmin
+    # minioadmin`; console at http://minio-console.localhost:8080.
+    # ae-identity keeps aws-sdk-go-v2 SigV4 intact behind CF's edge (it
+    # signs Accept-Encoding); a no-op for local traffic.
+    labels:
+      - traefik.enable=true
+      # ae-identity is declared HERE, on the same container as the router
+      # that references it — declared elsewhere (e.g. on traefik itself),
+      # a provider-startup race can leave this router disabled with
+      # `middleware "ae-identity@docker" does not exist` until the next
+      # docker event refreshes the config.
+      - traefik.http.middlewares.ae-identity.headers.customrequestheaders.Accept-Encoding=identity
+      - traefik.http.routers.minio.rule=Host(`minio.localhost`) || Host(`minio.srclode.online`)
+      - traefik.http.routers.minio.service=minio
+      - traefik.http.routers.minio.middlewares=ae-identity
+      - traefik.http.services.minio.loadbalancer.server.port=9000
+      # console — local-only (never CF-exposed)
+      - traefik.http.routers.minio-console.rule=Host(`minio-console.localhost`)
+      - traefik.http.routers.minio-console.service=minio-console
+      - traefik.http.services.minio-console.loadbalancer.server.port=9001
+    networks: [clode]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+
+  minio-setup:
+    image: minio/mc:latest
+    depends_on:
+      minio: { condition: service_healthy }
+    entrypoint:
+      - sh
+      - -c
+      - |
+        set -e
+        mc alias set local http://minio:9000 minioadmin minioadmin
+        mc mb --ignore-existing local/databend
+        mc anonymous set public local/databend
+        # brahmi attachment uploads — local-only bucket; brahmi's STORAGE_BUCKET
+        # env is overridden in the brahmi service block to point at this name.
+        mc mb --ignore-existing local/brahmi-attachments
+        # ikki session-context tarballs (per-user browser profile blobs)
+        mc mb --ignore-existing local/ikki-session-contexts
+        # intervix recordings + per-turn audit audio
+        mc mb --ignore-existing local/intervix-recordings
+        # vova per-turn voice audio audit blobs (raw deepgram input + tts output).
+        # Bucket is private; vova reads/writes via path-style with static minio creds.
+        mc mb --ignore-existing local/vova-audio
+    networks: [clode]
+    restart: "no"
+
+  databend:
+    image: datafuselabs/databend:latest
+    environment:
+      QUERY_DEFAULT_USER: databend
+      QUERY_DEFAULT_PASSWORD: databend
+      QUERY_STORAGE_TYPE: s3
+      AWS_S3_ENDPOINT: http://minio:9000
+      AWS_S3_BUCKET: databend
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+      AWS_S3_ALLOW_INSECURE: "true"
+    # databend's image declares VOLUME for /etc, /var/lib, /var/log paths;
+    # name them so they don't accumulate as anonymous volumes.
+    volumes:
+      - databend_etc:/etc/databend
+      - databend_data:/var/lib/databend
+      - databend_minio:/var/lib/minio
+      - databend_log:/var/log/databend
+    # Host publishing so GUI clients (DBeaver, Beekeeper, TablePlus) can
+    # reach databend without hopping into the compose network. Uses the
+    # 1<orig> prefix convention (matches postgres 15432, redis 16379):
+    # 13307 = MySQL wire, 18000 = HTTP handler.
+    ports:
+      - "13307:3307"   # MySQL wire — connect DBeaver as "MySQL"
+      - "18000:8000"   # HTTP handler — REST/query
+    depends_on:
+      minio-setup: { condition: service_completed_successfully }
+    networks: [clode]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/v1/health"]
+      interval: 30s
+      timeout: 3s
+      retries: 10
+      start_period: 30s
+    restart: unless-stopped
+
+  # ------------------------------------------------------------------
+  # raksha — auth issuer (AUTH_ISSUER points here everywhere)
+  # ------------------------------------------------------------------
+  raksha:
+    build:
+      context: ${RAKSHA_DIR:-../raksha}
+      ssh: [default]
+    command: ["sh", "-c", "/app/raksha migrate && exec /app/raksha serve"]
+    env_file: [../raksha/.env]
+    environment:
+      <<: [*db-common, *redis-common, *service-urls, *allowed-origins, *admin-ids]
+      DB_NAME: raksha
+      PORT: 8080
+      JWT_ISSUER: http://raksha:8080
+      # raksha's own outward URL — the source of the OAuth provider redirect_uri
+      # (raksha wires SetBackendCallbackBase(GetBackendURL())) AND of email
+      # links. Locally it rides the FULL localhost/raksha passthrough (see the
+      # raksha-localhost router below) rather than raksha.localhost:8080, because
+      # Google accepts an http redirect_uri ONLY when the host is `localhost`.
+      # The passthrough forwards EVERY raksha path (strip /raksha), so every
+      # outward URL — /auth/oauth/callback/*, /verify-email/*, … — resolves the
+      # same. Register `http://localhost:8080/raksha/auth/oauth/callback/google`
+      # in the Google client. --public (up.sh) overrides this to
+      # https://raksha.srclode.online (already a valid provider host).
+      BACKEND_URL: ${STACK_RAKSHA_BACKEND_URL:-http://localhost:8080/raksha}
+      # FE landing for the OAuth BE-redirect callback (success fallback + error
+      # page). console-web is the live frontend on :3001 and routes on /login.
+      DEFAULT_RETURN_TO: http://localhost:3001/login
+      # Where raksha's /auth/oauth/authorize sends the browser for the login +
+      # consent UI. console-web hosts it on port 3001 (web-app-v2's :3000 is
+      # dead). Pinning it here makes the local stack behaviour explicit and
+      # immune to future env drift.
+      WEB_APP_URL: http://localhost:3001
+      # Point raksha's Google OAuth at the local oauth-mock instead of the real
+      # accounts.google.com, so the consent screen is a plain form a CDP browser
+      # can drive. One base covers all three endpoints ({base}/o/oauth2/auth,
+      # /token, /oauth2/v2/userinfo); the URL resolves from BOTH the browser and
+      # the raksha container via the traefik alias `oauth-mock.localhost` (above).
+      # The mock ignores client creds, so the real GOOGLE_CLIENT_ID from .env is
+      # reused as-is. To use real Google instead, comment this out (raksha reads
+      # it as optional — unset = real Google). (oauth-mock also serves GitHub;
+      # wire GITHUB_OAUTH_BASE_URL the same way once raksha grows that override.)
+      GOOGLE_OAUTH_BASE_URL: http://oauth-mock.localhost:8080
+      # Route raksha's transactional emails through the local notify service.
+      # NOTIFY_URL comes from *service-urls (http://notify:8080), NOTIFY_ADMIN_ORG_ID
+      # from *admin-ids, and raksha mints the SA token in-process against the
+      # org seeded by scripts/seed.sh.
+      #
+      # NOTIFY_FROM_* overrides EMAIL_FROM_* for this path only. The local
+      # notify container's RESEND_API_KEY has send.srclode.online verified
+      # (not noreply.clode.io like dev), so we use the matching From here.
+      # Dev/prod deploys use EMAIL_FROM_* directly since notify's key there
+      # has noreply.clode.io verified.
+      EMAIL_DELIVERY_METHOD: NOTIFY
+      NOTIFY_FROM_NAME: "Clode No-Reply"
+      NOTIFY_FROM_EMAIL: notify@send.srclode.online
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.raksha.rule=Host(`raksha.localhost`) || Host(`raksha.srclode.online`)
+      - traefik.http.services.raksha.loadbalancer.server.port=8080
+      # Full raksha passthrough at http://localhost:8080/raksha/* — a complete
+      # rewrite (strip /raksha → raksha:8080), NOT scoped to /auth. The browser
+      # reaches raksha under host `localhost` (so Google accepts the http
+      # redirect_uri) and EVERY path forwards: the OAuth callback, /verify-email,
+      # /auth/oauth/exchange, /api/v1/*, all of it. BACKEND_URL points here
+      # locally, so raksha's self-composed links resolve through this route too.
+      # Isolation intact: no new published port, still the one traefik ingress.
+      - traefik.http.routers.raksha-localhost.rule=Host(`localhost`) && PathPrefix(`/raksha`)
+      - traefik.http.routers.raksha-localhost.service=raksha
+      - traefik.http.routers.raksha-localhost.middlewares=raksha-localhost-strip
+      - traefik.http.middlewares.raksha-localhost-strip.stripprefix.prefixes=/raksha
+    # JWT signing keys — generated once on the host (./keys/raksha/*.pem) and
+    # mounted read-only. raksha's KeyManager skips generation when both files
+    # exist (internal/auth/keys/loader.go:25), so keys survive ./stack.sh wipe
+    # and ./stack.sh cleanup, and every wipe-then-up reuses the same kid/JWKS.
+    volumes:
+      - ./keys/raksha:/app/keys:ro
+    depends_on:
+      db: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    networks: [clode]
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://127.0.0.1:8080/health || exit 1"]
+      interval: 60s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+
+  # ------------------------------------------------------------------
+  # oauth-mock — OAuth provider test double (google + github, opt-in)
+  # ------------------------------------------------------------------
+  # Renders a plain-form "consent screen" a CDP browser can fill, and hands
+  # back whatever email is typed as the signed-in user (name/id/avatar are
+  # derived from it). Serves each provider's real endpoint paths. Only used
+  # when raksha's *_OAUTH_BASE_URL points here (see the raksha block);
+  # otherwise it just idles. Local-only test double — never CF-exposed, so a
+  # `.localhost`-only router (like ec2mock/ikki). Source: docker/oauth-mock/.
+  oauth-mock:
+    build:
+      context: ./docker/oauth-mock
+    environment:
+      LISTEN_ADDR: ":8080"
+      # Prefills the single email field; name/id/avatar are derived from it.
+      DEFAULT_EMAIL: testuser@clode.dev
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.oauth-mock.rule=Host(`oauth-mock.localhost`)
+      - traefik.http.services.oauth-mock.loadbalancer.server.port=8080
+    networks: [clode]
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://127.0.0.1:8080/healthz || exit 1"]
+      interval: 60s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    restart: unless-stopped
+
+  # ------------------------------------------------------------------
+  # jumbo — platform service (agent deploys, namespaces, identity)
+  # ------------------------------------------------------------------
+  jumbo:
+    build:
+      context: ${JUMBO_DIR:-../jumbo}
+      ssh: [default]
+    command: ["sh", "-c", "/app/jumbo migrate && exec /app/jumbo serve"]
+    env_file: [../jumbo/.env]
+    environment:
+      <<: [*db-common, *service-urls, *allowed-origins]
+      DB_NAME: jumbo
+      PORT: 8080
+      # Override jumbo's default `ghcr.io/clode-labs` trusted-image prefix
+      # so locally-built kairo images at `clode-stack/benji:latest` (from
+      # ./stack.sh up --agent) skip the registry HEAD probe.
+      PLATFORM_REPO: clode-stack
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.jumbo.rule=Host(`jumbo.localhost`) || Host(`jumbo.srclode.online`)
+      - traefik.http.services.jumbo.loadbalancer.server.port=8080
+    depends_on:
+      db: { condition: service_healthy }
+      raksha: { condition: service_healthy }
+    networks: [clode]
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://127.0.0.1:8080/health || exit 1"]
+      interval: 60s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+
+  # ------------------------------------------------------------------
+  # brahmi — orchestrator. Single-pod locally; POD_NAME/CLUSTER_GRPC_ADDR
+  # are kept because the code path expects them even when there's no
+  # peer to dial (brahmi:agent:*, brahmi:pool-agent:*, brahmi:terminal:*
+  # cluster keys are still written).
+  # ------------------------------------------------------------------
+  brahmi:
+    build:
+      context: ${BRAHMI_DIR:-../brahmi}
+      ssh: [default]
+    command: ["sh", "-c", "/app/brahmi migrate && exec /app/brahmi serve"]
+    env_file:
+      - ../brahmi/.env
+    environment:
+      <<: [*db-common, *redis-common, *service-urls, *admin-ids, *allowed-origins, *arambvm]
+      DB_NAME: brahmi
+      DB_SEARCH_PATH: public
+      PORT: 9000
+      # Cluster identity — POD_NAME goes into brahmi:agent:<id>.pod_id,
+      # CLUSTER_GRPC_ADDR is the peer-dial target other pods write there.
+      POD_NAME: brahmi-1
+      CLUSTER_GRPC_ADDR: brahmi:9500
+      # STORAGE_BUCKET overrides brahmi/.env's dev value → local bucket.
+      # S3 endpoint goes through traefik because brahmi's presigned URLs
+      # are fetched by the host browser (web-app attachments) and by chil
+      # (in-network, streams blobs to Slack) — SigV4 signs Host, so the
+      # signer and every fetcher must share one origin.
+      STORAGE_BUCKET:        brahmi-attachments
+      STORAGE_REGION:        us-east-1
+      S3_ENDPOINT_URL:       ${STACK_SCHEME:-http}://minio.${STACK_DOMAIN:-localhost}${STACK_PORT-:8080}
+      AWS_ACCESS_KEY_ID:     minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.brahmi.rule=Host(`brahmi.localhost`) || Host(`brahmi.srclode.online`)
+      - traefik.http.services.brahmi.loadbalancer.server.port=9000
+    depends_on:
+      db: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      raksha: { condition: service_healthy }
+      minio-setup: { condition: service_completed_successfully }
+      ec2mock: { condition: service_healthy }
+    networks: [clode]
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://127.0.0.1:9000/health || exit 1"]
+      interval: 60s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+
+  # ------------------------------------------------------------------
+  # pool-manager — external agent-pool replenisher (LOCAL_MODE=true).
+  # Behind the `pool` profile: brahmi's default provider is `aramb` but
+  # the pool-based path is opt-in locally. Run `./stack.sh up --profile pool`
+  # to bring it up alongside the base stack.
+  # ------------------------------------------------------------------
+  pool-manager:
+    profiles: [pool]
+    build:
+      context: ${POOL_MANAGER_DIR:-../pool-manager}
+      ssh: [default]
+    command: ["sh", "-c", "/app/pool-manager migrate && exec /app/pool-manager serve"]
+    env_file: [../pool-manager/.env]
+    environment:
+      <<: [*db-common, *service-urls, *admin-ids, *allowed-origins]
+      ENVIRONMENT: local
+      DB_NAME: pool-manager
+      PORT: 8080
+      LOCAL_MODE: "true"
+      DOCKER_NETWORK: clode
+      # BRAHMI_URL / BRAHMI_BASE_URL / BRAHMI_WS_URL inherit from the
+      # *service-urls anchor (http://brahmi:9000, ws://brahmi:9000).
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.pool-manager.rule=Host(`pool-manager.localhost`) || Host(`pool-manager.srclode.online`)
+      - traefik.http.services.pool-manager.loadbalancer.server.port=8080
+    depends_on:
+      db: { condition: service_healthy }
+      raksha: { condition: service_healthy }
+      jumbo: { condition: service_healthy }
+    networks: [clode]
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://127.0.0.1:8080/health/pool || exit 1"]
+      interval: 60s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+
+  # ------------------------------------------------------------------
+  # chil — Slack / Telegram integrations
+  # ------------------------------------------------------------------
+  chil:
+    profiles: [org]
+    build:
+      context: ${CHIL_DIR:-../chil}
+      ssh: [default]
+    command: ["sh", "-c", "/app/chil migrate && exec /app/chil serve"]
+    env_file: [../chil/.env]
+    environment:
+      <<: [*db-common, *service-urls, *allowed-origins]
+      ENVIRONMENT: local
+      DB_NAME: chil_new
+      PORT: 8080
+      BRAHMI_WS_URL: ws://brahmi:9000/api/v1/ws
+      FRONTEND_URL: http://localhost:3000
+      # chil's outward URL — slack/telegram OAuth redirects and any
+      # browser-triggered callback land here. NOTE: Slack requires https
+      # redirect URLs and Telegram requires a public https webhook, so
+      # the install flows only complete under `--public`; socket-mode
+      # event delivery and blob attachment upload work fully local.
+      BACKEND_URL:  ${STACK_SCHEME:-http}://chil.${STACK_DOMAIN:-localhost}${STACK_PORT-:8080}
+      # First-user org onboarding (slack/org-onboarding-flow.md): at
+      # install-complete, chil's OnInstallComplete calls brahmi
+      # /api/v1/onboarding to provision the workspace public project +
+      # one channel-application per public channel + claim one cloud
+      # agent — replacing the lazy SurfaceResolver + web-app
+      # createDefaultProject race that blows the org memory quota on
+      # the first user. Off by default; flip to "true" to exercise the
+      # path locally.
+      CHIL_ENABLE_ORG_ONBOARDING: "true"
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.chil.rule=Host(`chil.localhost`) || Host(`chil.srclode.online`)
+      - traefik.http.services.chil.loadbalancer.server.port=8080
+    depends_on:
+      db: { condition: service_healthy }
+      raksha: { condition: service_healthy }
+    networks: [clode]
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://127.0.0.1:8080/health || exit 1"]
+      interval: 60s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+
+  # ------------------------------------------------------------------
+  # notify — multi-provider email dispatch (Resend today; SES/Postmark
+  # later). POST /emails is async: handler enqueues, an in-process outbox
+  # worker sends via the provider with retries. Provider webhooks land at
+  # /api/v1/webhooks/email/:provider; a callback worker forwards
+  # normalized events to each message's caller-supplied callback_url.
+  #
+  # Behind the `email` profile: nothing in the base stack requires notify
+  # to be up. raksha's `EMAIL_DELIVERY_METHOD: NOTIFY` targets it, but a
+  # send just fails at the outbox worker if notify isn't running — every
+  # other service continues to boot cleanly. Opt in with
+  # `./stack.sh up --profile email`.
+  # ------------------------------------------------------------------
+  notify:
+    profiles: [email]
+    build:
+      context: ${NOTIFY_DIR:-../notify}
+      ssh: [default]
+    command: ["sh", "-c", "/app/notify migrate && exec /app/notify serve"]
+    env_file: [../notify/.env]
+    environment:
+      <<: [*db-common, *service-urls, *allowed-origins]
+      ENVIRONMENT: local
+      DB_NAME: notify
+      PORT: 8080
+      # notify's outward URL — the address provider webhooks (Resend
+      # delivery events) are registered against. Local mode: outbound
+      # sends work, inbound webhooks can't arrive; --public makes it
+      # https://notify.srclode.online. In-network callers keep dialing
+      # http://notify:8080 from the *service-urls anchor.
+      BACKEND_URL: ${STACK_SCHEME:-http}://notify.${STACK_DOMAIN:-localhost}${STACK_PORT-:8080}
+      FRONTEND_URL: http://localhost:3000
+      # Local Resend keys stay unset by default; sends fail-fast in the
+      # outbox worker with a clean upstream error until you populate them.
+      # Copy real values into ../notify/.env if you want to smoke a real
+      # send from the stack. Nothing else changes here.
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.notify.rule=Host(`notify.localhost`) || Host(`notify.srclode.online`)
+      - traefik.http.services.notify.loadbalancer.server.port=8080
+    depends_on:
+      db: { condition: service_healthy }
+      raksha: { condition: service_healthy }
+    networks: [clode]
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://127.0.0.1:8080/health || exit 1"]
+      interval: 60s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+
+  # ------------------------------------------------------------------
+  # intervix
+  # ------------------------------------------------------------------
+  intervix:
+    profiles: [interview]
+    build:
+      context: ${INTERVIX_DIR:-../intervix}
+      ssh: [default]
+    command: ["sh", "-c", "/app/intervix migrate && exec /app/intervix serve"]
+    env_file: [../intervix/.env]
+    environment:
+      <<: [*service-urls, *allowed-origins]
+      ENVIRONMENT: local
+      PORT: 8080
+      DATABASE_URL: postgres://postgres:postgres@db:5432/intervix?sslmode=disable
+      REDIS_URL:    redis://:clode-redis-local@redis:6379/0
+      # intervix's outward URL — used by the interview agent (curl
+      # $BACKEND_URL/agent/setup.sh and the /score POST) and by the
+      # recruiter UI for absolute-URL construction. Locally the agent is
+      # a container on the `clode` bridge (via ec2mock/pool), so the
+      # traefik alias serves agent and browser from the same origin — no
+      # tunnel hop for either.
+      BACKEND_URL:  ${STACK_SCHEME:-http}://intervix.${STACK_DOMAIN:-localhost}${STACK_PORT-:8080}
+      FRONTEND_URL: http://localhost:3000
+      COOKIE_SECURE: "false"
+      LLM_PROVIDER: brahmi
+      # When VOVA_ENABLED=true the candidate's voice WS is proxied to vova
+      # (Deepgram STT + Brahmi LLM + Deepgram TTS handled there); intervix
+      # keeps screen-share, recording, and proctor-events end-to-end.
+      # VOVA_WS_URL is a BASE — the relay appends /api/v1/voice itself.
+      VOVA_ENABLED: "true"
+      VOVA_WS_URL:  ws://vova:8080
+      RAKSHA_JWKS_URL:          http://raksha:8080/.well-known/jwks.json
+      RAKSHA_ISSUER:            http://raksha:8080
+      RAKSHA_AUDIENCE:          backend-services
+      RAKSHA_INTERNAL_BASE_URL: http://raksha:8080
+      # OAuth 2.1 code+PKCE flow: intervix composes the raksha /authorize
+      # URL and swaps the code for tokens on /auth/oauth/token. Client_id
+      # is seeded into raksha's oauth_clients table by clode-stack/scripts/
+      # seed.sh (step 1d) with the matching redirect_uri.
+      #
+      # RAKSHA_PUBLIC_BASE_URL is used for two calls that sit on
+      # different sides of the docker boundary — the browser 302 to
+      # /auth/oauth/authorize AND intervix's own backend POST to
+      # /auth/oauth/token. traefik serves both: the host resolves
+      # raksha.localhost to loopback, containers resolve it via the
+      # network alias — same origin, no host-mapping tricks needed.
+      RAKSHA_PUBLIC_BASE_URL:      ${STACK_SCHEME:-http}://raksha.${STACK_DOMAIN:-localhost}${STACK_PORT-:8080}
+      INTERVIX_OAUTH_CLIENT_ID:    intervix-local
+      INTERVIX_OAUTH_REDIRECT_URI: http://localhost:3001/auth/callback
+      INTERVIX_OAUTH_SCOPE:        aramb
+      # Recordings are played back in the recruiter's browser via
+      # presigned URLs — signed against the traefik minio origin so the
+      # same URL works for intervix (signer, in-network) and the browser.
+      S3_BUCKET:             intervix-recordings
+      S3_REGION:             us-east-1
+      S3_PREFIX:             intervix
+      AWS_REGION:            us-east-1
+      AWS_PROFILE:           ""
+      S3_ENDPOINT_URL:       ${STACK_SCHEME:-http}://minio.${STACK_DOMAIN:-localhost}${STACK_PORT-:8080}
+      AWS_ACCESS_KEY_ID:     minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.intervix.rule=Host(`intervix.localhost`) || Host(`intervix.srclode.online`)
+      - traefik.http.services.intervix.loadbalancer.server.port=8080
+    depends_on:
+      db:          { condition: service_healthy }
+      redis:       { condition: service_healthy }
+      raksha:      { condition: service_healthy }
+      brahmi:      { condition: service_healthy }
+      vova:        { condition: service_healthy }
+      minio-setup: { condition: service_completed_successfully }
+    networks: [clode]
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://127.0.0.1:8080/health || exit 1"]
+      interval: 60s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+
+  # ------------------------------------------------------------------
+  # vova — AI voice agent (Deepgram STT/TTS + Bedrock/Brahmi LLM). REST
+  # admin surface + WebSocket conversation path. Secrets (DEEPGRAM_API_KEY,
+  # TAVILY_API_KEY, AWS creds), model id, and the LLM provider allow-list
+  # come from ../vova/.env — we deliberately do NOT override them here so
+  # local behavior tracks whatever the sibling .env declares.
+  #
+  # Only stack-topology env is overridden: DB → shared postgres, redis →
+  # shared redis on logical DB 3, S3 → local MinIO bucket, BRAHMI_WS_URL →
+  # in-stack brahmi (so vova talks to the local brahmi, not prod cloud).
+  # ------------------------------------------------------------------
+  vova:
+    profiles: [voice]
+    build:
+      context: ${VOVA_DIR:-../vova}
+      ssh: [default]
+    command: ["sh", "-c", "/app/vova migrate && exec /app/vova serve"]
+    env_file: [../vova/.env]
+    environment:
+      <<: [*db-common, *redis-common, *service-urls, *allowed-origins]
+      ENVIRONMENT: local
+      DB_NAME: vova
+      DB_SEARCH_PATH: public
+      PORT: 8080
+      BACKEND_URL: ${STACK_SCHEME:-http}://vova.${STACK_DOMAIN:-localhost}${STACK_PORT-:8080}
+      # ../vova/.env has REDIS_URL commented out, so vova's composeRedisURL()
+      # falls through to the discrete REDIS_HOST/REDIS_PORT/REDIS_DB/
+      # REDIS_PASSWORD path — the latter two come from *redis-common.
+      # Logical DB 3 (raksha+brahmi=0, mang-proxy=1, ikki=2).
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      REDIS_DB:   "3"
+      # Override prod brahmi (wss://api.clode.space/brahmi from .env.example)
+      # to the in-stack brahmi. Stack-topology only — the provider allow-list
+      # itself stays whatever vova's .env sets.
+      BRAHMI_WS_URL: ws://brahmi:9000
+      # Non-empty S3_ENDPOINT flips vova into path-style AND scopes the
+      # static creds to the S3 client only — Bedrock keeps the default
+      # AWS chain (AWS_PROFILE / region / secrets from ../vova/.env).
+      # Direct in-network endpoint: the vova-audio bucket is private and
+      # only vova itself reads/writes it — no presigned URLs leave the
+      # container, so no traefik hop needed.
+      S3_BUCKET:            vova-audio
+      S3_ENDPOINT:          http://minio:9000
+      S3_ACCESS_KEY_ID:     minioadmin
+      S3_SECRET_ACCESS_KEY: minioadmin
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.vova.rule=Host(`vova.localhost`) || Host(`vova.srclode.online`)
+      - traefik.http.services.vova.loadbalancer.server.port=8080
+    depends_on:
+      db:          { condition: service_healthy }
+      redis:       { condition: service_healthy }
+      raksha:      { condition: service_healthy }
+      brahmi:      { condition: service_healthy }
+      minio-setup: { condition: service_completed_successfully }
+    networks: [clode]
+    healthcheck:
+      # debian:bookworm-slim runtime (vova is the only non-alpine service
+      # in the stack) ships neither wget nor curl. Use bash's /dev/tcp
+      # built-in to probe /health. CMD (not CMD-SHELL) so bash — not the
+      # /bin/sh → dash symlink — is the interpreter.
+      test:
+        - CMD
+        - bash
+        - -c
+        - exec 3<>/dev/tcp/127.0.0.1/8080 && printf 'GET /health HTTP/1.0\r\n\r\n' >&3 && read -r l <&3 && [[ "$$l" == *200* ]]
+      interval: 60s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+
+  # ------------------------------------------------------------------
+  # gitana — GitHub App integration (install flow + repo/org access)
+  # ------------------------------------------------------------------
+  gitana:
+    profiles: [tools]
+    build:
+      context: ${GITANA_DIR:-../gitana}
+      ssh: [default]
+    command: ["sh", "-c", "/app/gitana migrate && exec /app/gitana serve"]
+    env_file: [../gitana/.env]
+    environment:
+      <<: [*db-common, *service-urls, *allowed-origins]
+      ENVIRONMENT: local
+      DB_NAME: gitana
+      PORT: 8080
+      # GitHub posts install callbacks to gitana.srclode.online — an
+      # inherently external caller, so the install flow needs `--public`
+      # (cloudflared → traefik → gitana). Everything else works local.
+      FRONTEND_URL: http://localhost:3000
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.gitana.rule=Host(`gitana.localhost`) || Host(`gitana.srclode.online`)
+      - traefik.http.services.gitana.loadbalancer.server.port=8080
+    depends_on:
+      db: { condition: service_healthy }
+      raksha: { condition: service_healthy }
+    networks: [clode]
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://127.0.0.1:8080/health || exit 1"]
+      interval: 60s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+
+  # ------------------------------------------------------------------
+  # ikki — Browser-as-a-Service (Steel-only locally; no docker socket,
+  # no louie/harbor — provider toggles below force the steel-only mode
+  # regardless of what ../ikki/.env has set for its own e2e compose.
+  # Redis-only (HAS_DB=false); shared redis on logical DB 2.
+  # ------------------------------------------------------------------
+  ikki:
+    profiles: [browser]
+    build:
+      context: ${IKKI_DIR:-../ikki}
+      ssh: [default]
+    command: ["/app/ikki", "serve"]
+    env_file: [../ikki/.env]
+    environment:
+      # *admin-ids for ADMIN_USER_IDS — cha-ching's admin usage reads
+      # authenticate with an SA token attributed to the raksha-chaching
+      # bot user; ikki gates those routes by JWT user.id.
+      <<: [*redis-common, *service-urls, *allowed-origins, *admin-ids]
+      ENVIRONMENT: local
+      HAS_DB: "false"
+      PORT: 7602
+      GRPC_PORT: 7603
+      # Logical redis DB 2 (raksha+brahmi=0, mang-proxy=1)
+      REDIS_DB: "2"
+      REDIS_KEY_PREFIX: "ikki:"
+      # Steel-only — every other provider off. ikki/.env keeps DOCKER+LOUIE on
+      # for its e2e compose; we force them off here.
+      STEEL_ENABLED: "true"
+      DOCKER_PROVIDER_ENABLED: "false"
+      LOUIE_ENABLED: "false"
+      HARBOR_ENABLED: "false"
+      JUMBO_ENABLED: "false"
+      BROWSER_BASE_ENABLED: "false"
+      ARAMB_ENABLED: "false"
+      # CheckDependencies only probes RAKSHA_URL when Jumbo/Harbor are on, so
+      # this is cosmetic for steel-only — set anyway for consistency.
+      RAKSHA_URL: http://raksha:8080
+      # CDP URL returned to clients connecting back to ikki's websocket.
+      # ikki.localhost routes via traefik from host AND containers (alias),
+      # so agent-side and desktop CDP clients share one URL.
+      CDP_BASE_URL: ws://ikki.localhost:8080
+      # STORAGE_BUCKET stores context tarballs (per-user browser profile
+      # blobs); unset = context routes no-op. Direct in-network endpoint:
+      # Steel receives context VALUES inline as JSON (never fetches S3 —
+      # see ikki/internal/provider/steel/provider.go SessionContext), and
+      # the presigned-URL consumers (stealth daemons in browser
+      # containers) are in-network. Nothing external reads this bucket.
+      STORAGE_BUCKET:        ikki-session-contexts
+      STORAGE_REGION:        us-east-1
+      S3_ENDPOINT_URL:       http://minio:9000
+      AWS_ENDPOINT_URL_S3:   http://minio:9000
+      AWS_ACCESS_KEY_ID:     minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+    labels:
+      # local-only — ikki was never CF-exposed; do not add a srclode rule.
+      - traefik.enable=true
+      - traefik.http.routers.ikki.rule=Host(`ikki.localhost`)
+      - traefik.http.services.ikki.loadbalancer.server.port=7602
+    depends_on:
+      redis: { condition: service_healthy }
+      minio-setup: { condition: service_completed_successfully }
+    networks: [clode]
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://127.0.0.1:7602/health || exit 1"]
+      interval: 60s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+
+  # ------------------------------------------------------------------
+  # louie — tunnel broker (cloud ⇄ user's machine). We run the broker
+  # only; clients + cloudconnect live on user machines / inside cloud
+  # browser containers. Redis is the shared instance (needed once
+  # HTTP proxy is on — cluster mode auto-enables when REDIS_ADDR is set).
+  #
+  # HTTP proxy is turned on with HTTP_PROXY_DOMAIN=srclode.online. The
+  # broker assigns each connected tunnel a `<name>.srclode.online`
+  # subdomain, and the cloudflared wildcard entry (last rule in
+  # cloudflared-config.yml) forwards any subdomain not already matched
+  # by a specific service ingress to louie:8280.
+  #
+  # BROKER_ADDR for kairo agents to dial is `louie:8600` on the `clode`
+  # bridge — wired into pool-manager's kairo svc_configs vars in
+  # data/pool-manager-svc-configs.json.
+  # ------------------------------------------------------------------
+  louie:
+    profiles: [browser]
+    build:
+      context: ${LOUIE_DIR:-../louie}
+      dockerfile: Dockerfile.broker
+      ssh: [default]
+    command: ["/app/broker"]
+    env_file: [../louie/.env]
+    environment:
+      <<: [*redis-common, *allowed-origins]
+      # Broker ports (container-internal).
+      BROKER_LISTEN_ADDR: 0.0.0.0:8600
+      BROKER_GRPC_PORT:   "8600"
+      BROKER_HTTP_PORT:   "8080"
+      BROKER_METRICS_PORT: "8690"
+      BROKER_LOG_LEVEL:   debug
+      HAS_DB:             "false"
+      # Service DNS name stands in for the pod IP — docker's embedded DNS
+      # resolves it on the `clode` bridge.
+      POD_IP: louie
+      # Auth issuer — swap the prod URL from ../louie/.env for the
+      # in-stack raksha so JWTs minted from raksha's dev endpoint
+      # validate here.
+      AUTH_ISSUER:        http://raksha:8080
+      # HTTP proxy — wildcard subdomain routing. Locally assigned names
+      # come back as `<name>.tunnel.localhost` (resolves to loopback on
+      # the host → traefik → the catch-all router below → louie:8280).
+      # Under --public, STACK_TUNNEL_DOMAIN=srclode.online restores
+      # `<name>.srclode.online` via the CF wildcard. Tunnel URLs resolve
+      # on the host only in local mode — docker DNS can't wildcard-alias.
+      HTTP_PROXY_ENABLED: "true"
+      HTTP_PROXY_DOMAIN:  ${STACK_TUNNEL_DOMAIN:-tunnel.localhost}
+      HTTP_PROXY_PORT:    "8280"
+      # Local run — keep syntho + vexor off. ../louie/.env ships them
+      # enabled with prod Evomi / 2captcha / capsolver keys; we don't
+      # want the local stack burning quota on those providers.
+      SYNTHO_ENABLED: "false"
+      VEXOR_ENABLED:  "false"
+    ports:
+      - "8600:8600"   # gRPC (kairo agents dial louie:8600 in-network; host clients dial localhost:8600)
+    labels:
+      - traefik.enable=true
+      # admin HTTP API — louie.localhost:8080 / louie.srclode.online
+      - traefik.http.routers.louie.rule=Host(`louie.localhost`) || Host(`louie.srclode.online`)
+      - traefik.http.routers.louie.service=louie-admin
+      - traefik.http.services.louie-admin.loadbalancer.server.port=8080
+      # tunnel wildcard — catch-all at the lowest priority, so any Host
+      # no specific router claims (tunnel names under *.tunnel.localhost
+      # or *.srclode.online) falls through to the HTTP proxy. Mirrors the
+      # old cloudflared last-rule wildcard.
+      - traefik.http.routers.louie-tunnel.rule=HostRegexp(`^.+$`)
+      - traefik.http.routers.louie-tunnel.priority=1
+      - traefik.http.routers.louie-tunnel.service=louie-tunnel
+      - traefik.http.services.louie-tunnel.loadbalancer.server.port=8280
+    depends_on:
+      redis:  { condition: service_healthy }
+      raksha: { condition: service_healthy }
+    networks: [clode]
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://127.0.0.1:8080/health || exit 1"]
+      interval: 60s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+
+  # ------------------------------------------------------------------
+  # cha-ching — LLM quota / tier service
+  # ------------------------------------------------------------------
+  cha-ching:
+    build:
+      context: ${CHA_CHING_DIR:-../cha-ching}
+      ssh: [default]
+    command: ["sh", "-c", "/app/cha-ching migrate && exec /app/cha-ching serve"]
+    env_file: [../cha-ching/.env]
+    environment:
+      <<: [*db-common, *service-urls, *admin-ids, *allowed-origins]
+      DB_NAME: chaching
+      PORT: 8086
+      BACKEND_URL: http://cha-ching:8086
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.cha-ching.rule=Host(`cha-ching.localhost`) || Host(`cha-ching.srclode.online`)
+      - traefik.http.services.cha-ching.loadbalancer.server.port=8086
+    depends_on:
+      db: { condition: service_healthy }
+      raksha: { condition: service_healthy }
+    networks: [clode]
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://127.0.0.1:8086/health || exit 1"]
+      interval: 60s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+
+  # ------------------------------------------------------------------
+  # aramb-gateway — stateless runtime-plane gateway for the aramb
+  # console (builder-key / platform-session auth, playground /v1/stream
+  # WS + usage REST, fan-out to raksha/brahmi/cha-ching).
+  #
+  # DB-less by construction — config.go force-sets HAS_DB=false, so
+  # there is deliberately NO DB_NAME here (the seeder skips it) and no
+  # migrate step (the binary has no subcommands; image CMD serves).
+  # Env mirrors .infra/kustomize/overlays/dev/env-app.txt: the four
+  # service URLs + AGENTID_SIGNING_KEY are fatal-if-missing at boot;
+  # RAKSHA_INTERNAL_URL / BRAHMI_URL / BRAHMI_WS_URL / CHACHING_URL /
+  # AUTH_ISSUER all inherit from *service-urls.
+  #
+  # console-web (localhost:3001) calls it cross-origin through traefik;
+  # the /v1/stream WS authenticates via Authorization header or the
+  # `__bkey` query fallback (builderkey.go), so no same-origin proxy is
+  # needed and no traefik network alias (browser-only consumer).
+  # ------------------------------------------------------------------
+  aramb-gateway:
+    build:
+      context: ${ARAMB_GATEWAY_DIR:-../aramb-gateway}
+      ssh: [default]
+    env_file: [../aramb-gateway/.env]
+    environment:
+      <<: [*service-urls, *allowed-origins]
+      ENVIRONMENT: local
+      PORT: 8080
+      # HMAC key signing opaque agentId handles — gateway-internal (no
+      # other service verifies them), any stable local value works.
+      AGENTID_SIGNING_KEY: local-agentid-signing-key
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.aramb-gateway.rule=Host(`aramb-gateway.localhost`) || Host(`aramb-gateway.srclode.online`)
+      - traefik.http.services.aramb-gateway.loadbalancer.server.port=8080
+    depends_on:
+      raksha: { condition: service_healthy }
+      brahmi: { condition: service_healthy }
+      cha-ching: { condition: service_healthy }
+    networks: [clode]
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://127.0.0.1:8080/health || exit 1"]
+      interval: 60s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+
+  # ------------------------------------------------------------------
+  # toolkit-proxy — Composio tool integrations MCP
+  # ------------------------------------------------------------------
+  toolkit-proxy:
+    profiles: [tools]
+    build:
+      context: ${TOOLKIT_PROXY_DIR:-../toolkit-proxy}
+      ssh: [default]
+    command: ["sh", "-c", "/app/toolkit-proxy migrate && exec /app/toolkit-proxy serve"]
+    env_file: [../toolkit-proxy/.env]
+    environment:
+      <<: [*db-common, *service-urls, *allowed-origins]
+      PORT: 8080
+      ENVIRONMENT: local
+      HAS_DB: "true"
+      DB_NAME: toolkit_proxy
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.toolkit-proxy.rule=Host(`toolkit-proxy.localhost`) || Host(`toolkit-proxy.srclode.online`)
+      - traefik.http.services.toolkit-proxy.loadbalancer.server.port=8080
+    depends_on:
+      db: { condition: service_healthy }
+      raksha: { condition: service_healthy }
+    networks: [clode]
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://127.0.0.1:8080/health || exit 1"]
+      interval: 60s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+
+  # ------------------------------------------------------------------
+  # mcp-server — aramb-workflows MCP server (Streamable HTTP transport).
+  # OAuth 2.1 resource server that verifies raksha-issued JWTs at the
+  # edge, then proxies tool calls into brahmi (workflows, chats, exec,
+  # applications), jumbo (application list), and toolkit-proxy (toolkits
+  # + triggers). Same JWT the caller passes to /mcp is forwarded to each
+  # upstream — one trust domain, no conversion.
+  #
+  # No database, no migrations — reads all state from upstreams. Runs bun
+  # (Alpine) with the CMD from ../mcp-server/Dockerfile
+  # (`bun src/http-server.ts`).
+  #
+  # PUBLIC_BASE_URL is the origin the metadata doc advertises + the
+  # audience the server signs into the resource-metadata challenge on
+  # 401. Set to the cloudflared-fronted hostname so real MCP clients
+  # (Claude Code / Codex) can resolve the URLs the challenge advertises.
+  # In-network curl-driven smoke tests still work — the healthcheck hits
+  # 127.0.0.1:3000/healthz directly.
+  # ------------------------------------------------------------------
+  mcp-server:
+    profiles: [mcp]
+    build:
+      context: ${MCP_SERVER_DIR:-../mcp-server}
+    environment:
+      <<: [*service-urls, *admin-ids, *allowed-origins]
+      PORT: 3000
+      # x-service-urls sets AUTH_ISSUER=http://raksha:8080, which is what
+      # mcp-server's auth-verify uses as the trust root. Pin JWKS
+      # explicitly so a mis-set AUTH_ISSUER never turns into an unroutable
+      # JWKS default.
+      AUTH_JWKS_URL:     http://raksha:8080/.well-known/jwks.json
+      AUTH_TOKEN_ISSUER: http://raksha:8080
+      # ARAMB_USER_ID falls back to the stdio-mode dev sub when a caller
+      # doesn't send a Bearer token. Reuse the stack's admin id so any
+      # curl-driven smoke check maps to the seeded admin user.
+      ARAMB_USER_ID:     "${ADMIN_USER_ID:-b2290247-c2af-44c0-9b2d-1e5c5a6a4894}"
+      # Origin advertised in the resource-metadata doc + 401 challenge.
+      # Local: host-side MCP clients (Claude Code on this machine) resolve
+      # mcp-server.localhost:8080. --public: real external clients via CF.
+      PUBLIC_BASE_URL:   ${STACK_SCHEME:-http}://mcp-server.${STACK_DOMAIN:-localhost}${STACK_PORT-:8080}
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.mcp-server.rule=Host(`mcp-server.localhost`) || Host(`mcp-server.srclode.online`)
+      - traefik.http.services.mcp-server.loadbalancer.server.port=3000
+    depends_on:
+      raksha: { condition: service_healthy }
+      brahmi: { condition: service_healthy }
+    networks: [clode]
+    healthcheck:
+      # BusyBox wget on the alpine base rejects --no-verbose/--tries; use
+      # the portable subset (-q --spider) that both busybox and gnu wget
+      # understand.
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:3000/healthz || exit 1"]
+      interval: 60s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    restart: unless-stopped
+
+  # ------------------------------------------------------------------
+  # mang-proxy — LLM auth proxy (Anthropic / OpenAI / Codex routing)
+  # ------------------------------------------------------------------
+  # The Go field `DEK` is read from env `SECRET_DEK`. In ENVIRONMENT=local
+  # the secret loader accepts a plain hex value (32 bytes).
+  # Provider tokens are NOT in env — seed.sh runs `load-keys --platform`
+  # inside this container, sourcing CLAUDE_CODE_OAUTH_TOKEN (and any other
+  # provider tokens you export) from the host env.
+  mang-proxy:
+    build:
+      context: ${MANG_PROXY_DIR:-../mang-proxy}
+      ssh: [default]
+    entrypoint: ["sh", "-c"]
+    # load-keys --platform (no provider/key flags) scans env for the
+    # CLAUDE_CODE_OAUTH_TOKEN / ANTHROPIC_API_KEY / OPENAI_API_KEY /
+    # CODEX_OAUTH_TOKEN(+REFRESH) suffixes from internal/loadkeys/loadkeys.go
+    # and AES-256-GCMs them into shared redis DB 1 under
+    # platform_key:data:{uuid} / platform_key:index:{provider}.
+    # Idempotent in effect (round-robin tolerates dupes); use
+    # `mang-proxy load-keys --disable <provider>` to clear if you want a
+    # single clean entry per provider.
+    command: ["/app/mang-proxy migrate || true; /app/mang-proxy load-keys --platform || true; exec /app/mang-proxy serve"]
+    env_file: [../mang-proxy/.env]
+    environment:
+      <<: [*redis-common, *service-urls, *admin-ids, *databend-common]
+      # Logical Redis DB allocation across the stack
+      # (raksha+brahmi=0, mang-proxy=1, ikki=2, vova=3).
+      REDIS_DB: "1"
+      # Per-service database inside the shared databend instance.
+      DATABEND_DATABASE: mang_proxy
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.mang-proxy.rule=Host(`mang-proxy.localhost`) || Host(`mang-proxy.srclode.online`)
+      - traefik.http.services.mang-proxy.loadbalancer.server.port=8080
+    depends_on:
+      redis:    { condition: service_healthy }
+      databend: { condition: service_healthy }
+      raksha:   { condition: service_healthy }
+      jumbo:    { condition: service_healthy }
+    networks: [clode]
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://127.0.0.1:8080/health || exit 1"]
+      interval: 60s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+    restart: unless-stopped
+
+  # ------------------------------------------------------------------
+  # skills-registry — skills catalog + workflow templates
+  # ------------------------------------------------------------------
+  # ADMIN_USER_ID gates POST/PUT/PATCH/DELETE on /api/v1/workflow-templates.
+  # WORKERS_ENABLED=false keeps the GitHub import worker off — seed.sh runs
+  # imports synchronously through the /me/import endpoint, which is fine
+  # because the suspect public POST /api/v1/import is not actually wired up
+  # in the routes.
+  skills-registry:
+    profiles: [skills]
+    build:
+      context: ${SKILLS_REGISTRY_DIR:-../skills-registry}
+      ssh: [default]
+    command: ["sh", "-c", "/app/skills-registry migrate && exec /app/skills-registry serve"]
+    env_file: [../skills-registry/.env]
+    environment:
+      <<: [*db-common, *service-urls, *admin-ids, *allowed-origins]
+      DB_NAME: skills_registry
+      PORT: 8080
+      WORKERS_ENABLED: "false"
+      GITANA_BASE_URL: ""
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.skills-registry.rule=Host(`skills-registry.localhost`) || Host(`skills-registry.srclode.online`)
+      - traefik.http.services.skills-registry.loadbalancer.server.port=8080
+    depends_on:
+      db: { condition: service_healthy }
+      raksha: { condition: service_healthy }
+    networks: [clode]
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://127.0.0.1:8080/health || exit 1"]
+      interval: 60s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+
+  # ------------------------------------------------------------------
+  # narnia — deployment orchestrator (Temporal-backed control plane for
+  # build / argocd-deploy / argocd-delete / aramb-pr workflows). Behind
+  # the `deploy` profile because it pulls in the full build-and-deploy
+  # path (narnia-workers below + an external Temporal Cloud namespace
+  # via TEMPORAL_* in ../narnia/.env) — opt in with
+  # `./stack.sh up --profile deploy`. .env is mounted as-is; the
+  # localhost-pointing JUMBO_BASE_URL / AUTH_ISSUER / DB_HOST values
+  # are overridden here so they resolve to the in-stack compose DNS
+  # names instead of the host loopback that .env targets for solo runs.
+  # ------------------------------------------------------------------
+  narnia:
+    profiles: [deploy]
+    build:
+      context: ${NARNIA_DIR:-../narnia}
+      ssh: [default]
+    command: ["sh", "-c", "/app/narnia migrate && exec /app/narnia serve"]
+    env_file: [../narnia/.env]
+    environment:
+      <<: [*db-common, *allowed-origins]
+      DB_NAME: narnia
+      HOST: 0.0.0.0
+      PORT: 8081
+      JUMBO_BASE_URL: http://jumbo:8080
+      AUTH_ISSUER:    http://raksha:8080
+    labels:
+      # local-only — narnia was never CF-exposed; do not add a srclode rule.
+      - traefik.enable=true
+      - traefik.http.routers.narnia.rule=Host(`narnia.localhost`)
+      - traefik.http.services.narnia.loadbalancer.server.port=8081
+    depends_on:
+      db:     { condition: service_healthy }
+      raksha: { condition: service_healthy }
+      jumbo:  { condition: service_healthy }
+    networks: [clode]
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://127.0.0.1:8081/health || exit 1"]
+      interval: 60s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+
+  # ------------------------------------------------------------------
+  # k3s — single-node Kubernetes + preinstalled ArgoCD, standing in for
+  # the prod cluster ArgoCD reconciles into. One container: k3s runs PID
+  # 1, a background init script installs ArgoCD, preseeds the admin
+  # password to a known value ("clode-local"), and exposes argocd-server
+  # as NodePort 30443. narnia-workers logs in with that password at
+  # startup and mints its own apiKey token — no shared volume, no init
+  # sidecar. The image is built from ./docker/k3s-argocd/.
+  # ------------------------------------------------------------------
+  k3s:
+    profiles: [deploy]
+    build:
+      context: ./docker/k3s-argocd
+    privileged: true
+    tmpfs:
+      - /run
+      - /var/run
+    volumes:
+      - k3s_server:/var/lib/rancher/k3s
+    networks: [clode]
+    healthcheck:
+      test: ["CMD-SHELL", "kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml get --raw=/healthz | grep -q ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+    restart: unless-stopped
+
+  # ------------------------------------------------------------------
+  # narnia-workers — Temporal worker fleet (manifest-builder, argocd-
+  # deployer/deleter, build-worker, aramb-pr, frontend-deploy,
+  # notification-sender, hermes-worker) that drives the build/deploy
+  # pipeline jumbo + narnia kick off. No HTTP API consumed by other
+  # services; only its health port (8080) runs in-container. Pairs with
+  # `narnia` under the `deploy` profile. .env is mounted as-is; the
+  # localhost-pointing JUMBO_BASE_URL / JUMBO_EXTERNAL_URL /
+  # NARNIA_BASE_URL values (plus the unset-and-defaulted JUMBO_EXTERNAL_URL
+  # = https://api.clode.space/jumbo from pkg/config) are overridden here
+  # so build/deploy callbacks route to in-stack jumbo+narnia rather than
+  # the host loopback or the prod cluster.
+  #
+  # ArgoCD wiring is local-stack specific and NOT in ../narnia-workers/.env:
+  # the bind-mounted `narnia-workers-argocd-token.sh` runs before the
+  # binary, waits for the `k3s` service's ArgoCD, logs in as admin/clode-
+  # local, mints a long-lived apiKey token, then exports ARGOCD_ADDRESS/
+  # API_KEY/PROJECT and execs ./narnia-workers. No Dockerfile edit needed —
+  # curl + node ship in the runtime image.
+  # ------------------------------------------------------------------
+  narnia-workers:
+    profiles: [deploy]
+    build:
+      context: ${NARNIA_WORKERS_DIR:-../narnia-workers}
+      ssh: [default]
+    entrypoint: ["/argocd-token.sh"]
+    command: ["./narnia-workers"]
+    env_file: [../narnia-workers/.env]
+    environment:
+      JUMBO_BASE_URL:     http://jumbo:8080
+      JUMBO_EXTERNAL_URL: http://jumbo:8080
+      NARNIA_BASE_URL:    http://narnia:8081
+    volumes:
+      - ./scripts/narnia-workers-argocd-token.sh:/argocd-token.sh:ro
+    depends_on:
+      jumbo:  { condition: service_healthy }
+      narnia: { condition: service_healthy }
+      k3s:    { condition: service_healthy }
+    networks: [clode]
+    restart: unless-stopped
+
+  # ------------------------------------------------------------------
+  # ec2mock — local EC2 wire-protocol stand-in that translates the subset
+  # of EC2 API calls brahmi's aramb-vm provider makes into `docker`
+  # operations against the host daemon. Brahmi's AWS SDK client resolves
+  # AWS_ENDPOINT_URL_EC2 natively (no brahmi code changes), so pointing
+  # it at http://ec2mock:8080 makes every RunInstances → docker create,
+  # StopInstances → docker stop, etc.
+  #
+  # Docker socket bind: required — the mock creates real containers on the
+  # HOST daemon. Runs as root inside the container because it needs to
+  # read the socket (mode 660 root:docker on most hosts). The container
+  # has no other privileges; a mount + root uid inside is enough.
+  #
+  # --network clode: launched "instance" containers attach to the same
+  # bridge as brahmi/raksha/mang-proxy/etc. brahmi records their private
+  # IP from the mock's response and dials it — the mock returns the
+  # container name, which docker's embedded DNS resolves on this network.
+  #
+  # Image sync: seed.sh reads the kairo image from
+  # data/pool-manager-svc-configs.json and PUTs it to /_admin/config/default-image
+  # so the mock spawns the same container image pool-manager would.
+  # ------------------------------------------------------------------
+  ec2mock:
+    build:
+      context: ${EC2MOCK_DIR:-../ec2-docker-mock}
+    # --pull-policy=Never: the images this mock spawns live under a
+    # local-only namespace (clode-stack/*), so hitting Docker Hub for
+    # them would 401. Build them locally with `./stack.sh up --agent`
+    # and rely on whatever's on the daemon.
+    command: ["--addr", ":8080", "--network", "clode", "--pull-policy", "Never"]
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    labels:
+      # host-side hits for /_admin/* + EC2-wire smoke tests go through
+      # traefik at ec2mock.localhost:8080. LOCAL-ONLY on purpose: the
+      # admin API is unauthenticated — never add a srclode rule here.
+      - traefik.enable=true
+      - traefik.http.routers.ec2mock.rule=Host(`ec2mock.localhost`)
+      - traefik.http.services.ec2mock.loadbalancer.server.port=8080
+    networks: [clode]
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://127.0.0.1:8080/health || exit 1"]
+      interval: 60s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+  # ------------------------------------------------------------------
+  # cloudflared — OPT-IN public edge (`--public` / profile `public`).
+  # The stack is fully functional without it; this only adds inbound
+  # reachability from outside the machine: provider webhooks (Resend),
+  # Slack OAuth install + Telegram webhook, GitHub App callbacks,
+  # external MCP clients, and shareable louie tunnel URLs.
+  #
+  # Since traefik became the single ingress, the tunnel config is one
+  # catch-all rule (*.srclode.online → traefik:8080) — routing lives in
+  # the per-service traefik labels, so new services need no cloudflared
+  # edit. ~/.cloudflared provides the creds (cert.pem + tunnel-id JSON)
+  # mounted at /secrets; joins the `clode` bridge to resolve `traefik`.
+  # ------------------------------------------------------------------
+  cloudflared:
+    profiles: [public]
+    image: cloudflare/cloudflared:latest
+    # Run as root inside the container so it can read ~/.cloudflared (mode 700
+    # on the host). The container has no published ports, so this is safe.
+    user: "0:0"
+    command: ["tunnel", "--config", "/etc/cloudflared/clode-stack-config.yml", "run"]
+    volumes:
+      - ${HOME}/.cloudflared:/secrets:ro
+      - ./cloudflared-config.yml:/etc/cloudflared/clode-stack-config.yml:ro
+    networks: [clode]
+    # No depends_on: cloudflared resolves upstreams lazily via docker DNS on
+    # each request, with no pre-flight check. Listing services here would
+    # also defeat compose profiles — depends_on auto-activates profiled
+    # services regardless of --profile selection.
+    restart: unless-stopped
+
+  # ------------------------------------------------------------------
+  # console-web — aramb builder console (Vite 7 + React SPA). The only
+  # service run as a DEV SERVER, not a built image: the source is
+  # bind-mounted and `bun run dev` serves it with hot-module reload, so
+  # edits on the host reload live in the browser. `bun install` runs
+  # in-command on start (no separate install container), reconciling
+  # node_modules — kept in a named volume so the binaries are
+  # container-native and the host's node_modules is shadowed, never used.
+  #
+  # Part of the default stack (no profile) — a plain `./stack.sh up` brings
+  # it up. It has no build section, so the batched builder skips it; the
+  # first up pulls oven/bun and runs the in-container install.
+  #
+  # DEV-SERVER INGRESS EXCEPTION. Every other HTTP service routes through
+  # traefik on 8080; this one publishes a host port (3001) instead. Vite's
+  # HMR websocket is simplest when the browser reaches the dev server on its
+  # own origin, and Vite ≥7 host-checks any non-localhost Host — routing it
+  # through `console-web.localhost:8080` would need `server.allowedHosts` +
+  # `hmr.clientPort` edits in the repo's vite.config.ts. Publishing 3001
+  # avoids all of that: the browser loads http://localhost:3001 (also the
+  # port the repo's strictPort + .env.local already assume), and `--host`
+  # binds 0.0.0.0 so the published port is reachable. The app then calls the
+  # stack's backends cross-origin at <svc>.localhost:8080 (per
+  # ../console-web/.env.local); the ALLOWED_ORIGINS anchor already admits
+  # localhost:3001 (its `.localhost` suffix rule also covers *.localhost).
+  #
+  # env_file is the MAIN repo's .env.local even under a worktree override —
+  # .env.local is gitignored so a fresh worktree lacks it; Vite exposes the
+  # VITE_* vars from the container env regardless (config from main, code
+  # from the worktree — same rule as the backends' .env).
+  #
+  # WORKSPACE OVERRIDE. The mount source honors CONSOLE_WEB_DIR (set from
+  # workspaces.yaml) exactly like the build contexts do — point it at a
+  # console-web worktree and the dev server serves that checkout. One
+  # node_modules volume is shared across worktree switches; `bun install`
+  # on start reconciles it to whichever checkout is mounted.
+  # ------------------------------------------------------------------
+  console-web:
+    image: oven/bun:1
+    working_dir: /app
+    # --backend=copyfile: node_modules is a separate docker volume from bun's
+    # in-image cache, and bun's default hardlink backend cannot link across
+    # filesystems (it fails mid-extract, e.g. on wrangler). copyfile crosses
+    # the boundary reliably.
+    command: ["sh", "-c", "bun install --backend=copyfile && exec bun run dev --host 0.0.0.0"]
+    env_file: [../console-web/.env.local]
+    ports:
+      - "3001:3001"
+    volumes:
+      - ${CONSOLE_WEB_DIR:-../console-web}:/app
+      - console_web_node_modules:/app/node_modules
+    networks: [clode]
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  minio_data:
+  redis_data:
+  databend_etc:
+  databend_data:
+  databend_minio:
+  databend_log:
+  # k3s node state (containerd, kine). Wiped on `./stack.sh wipe`, which
+  # forces a fresh ArgoCD install on the next `up`.
+  k3s_server:
+  # console-web dev-server node_modules — container-native, shadows the
+  # host's; populated by `bun install` on first `--profile web` up.
+  console_web_node_modules:
+
+networks:
+  clode:
+    name: clode
+    driver: bridge

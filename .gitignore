@@ -1,0 +1,10 @@
+# Per-developer build-context overrides (see workspaces.example.yaml).
+# Local-only: which git worktree each service builds from. Never committed.
+workspaces.yaml
+workspaces.yml
+
+# Local secrets — never committed.
+keys/
+
+# Rolling per-service container logs — runtime output, not source.
+logs/

@@ -1,0 +1,26 @@
+# clode-stack tunnel config — public edge for `./stack.sh up --public`.
+#
+# Lives in this repo dir; the cloudflared service mounts it over
+# /etc/cloudflared/clode-stack-config.yml on top of the ~/.cloudflared
+# dir bind (which provides cert.pem + the tunnel-id JSON creds).
+#
+# Since traefik became the stack's single ingress, this config is one
+# catch-all rule: every *.srclode.online hostname forwards to traefik,
+# which routes by Host header from per-service docker labels (including
+# the louie tunnel wildcard via its lowest-priority catch-all router).
+# Adding a service to the stack never requires touching this file —
+# only its own traefik labels.
+#
+# The wildcard DNS CNAME `*.srclode.online` on this tunnel
+# (cf6cb58d-b43b-4e84-9c68-cf14652c9fc4) is still required — see
+# CLAUDE.md "Cloudflared: ingress rule ≠ DNS routing" for the restore
+# command if it gets clobbered.
+
+tunnel: cf6cb58d-b43b-4e84-9c68-cf14652c9fc4
+credentials-file: /secrets/cf6cb58d-b43b-4e84-9c68-cf14652c9fc4.json
+
+ingress:
+  - hostname: "*.srclode.online"
+    service: http://traefik:8080
+
+  - service: http_status:404

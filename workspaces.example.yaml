@@ -1,0 +1,16 @@
+# clode-stack workspace overrides — copy to workspaces.yaml to build selected
+# services from a git worktree instead of their main repo.
+#
+#   <service>: <selector>
+#
+# selector:  branch name  |  path (relative to ../<svc>, or absolute)  |  main
+# Config (env_file) always comes from the MAIN repo — only the code being
+# built moves. Comment a line out (#) to snap that service back to main.
+# `./stack.sh up` prints a table of whatever is overridden.
+
+brahmi: feat/persona-tests
+raksha: .claude/worktrees/sa-endpoints
+# jumbo: feat/x
+# console-web: feat/console-tests-page   # frontend too — overrides the dev-server mount source
+# benji: feat/model-pricing-source       # the agent image — ONLY takes effect with `./stack.sh up --agent`
+#                                         # (benji isn't a compose service; it's the locally-built VM image)
