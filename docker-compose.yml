@@ -43,14 +43,15 @@
 # x-service-urls anchor).
 #
 # S3 endpoints. Consumers whose presigned URLs leave the container
-# (brahmi attachments, intervix recordings) sign against the traefik
-# hostname: `${STACK_SCHEME:-http}://minio.${STACK_DOMAIN:-localhost}`
-# `${STACK_PORT-:8080}`. SigV4 signs the Host header, so the same URL
-# must be valid from the host and in-network — traefik's network aliases
-# (minio.localhost + minio.srclode.online on the `clode` bridge) make the
-# signer's dial and the browser's fetch hit the same origin. Backends
-# whose blobs never leave the network (databend, vova audio, ikki context
-# tarballs) use `http://minio:9000` direct. The old minio-proxy nginx is
+# (brahmi attachments, intervix + ikki recordings, vova audio) sign against
+# the traefik hostname: `${STACK_SCHEME:-http}://minio.${STACK_DOMAIN:-localhost}`
+# `${STACK_PORT-:8080}` — the shared `x-s3-common` / `x-minio-endpoint`
+# anchors. SigV4 signs the Host header, so the same URL must be valid from
+# the host and in-network — traefik's network aliases (minio.localhost +
+# minio.srclode.online on the `clode` bridge) make the signer's dial and the
+# browser's fetch hit the same origin. databend is the sole backend that uses
+# `http://minio:9000` direct (internal storage engine, never presigned). The
+# old minio-proxy nginx is
 # gone: its one job (restoring the CF-edge-mangled Accept-Encoding header
 # that breaks aws-sdk-go-v2 SigV4) is now the `ae-identity` traefik
 # middleware on the minio router. Full history: CLAUDE.md's Cloudflare
@@ -97,6 +98,26 @@ x-databend-common: &databend-common
   DATABEND_USER:     databend
   DATABEND_PASSWORD: databend
 
+# MinIO S3 origin. Presigned GET/PUT URLs are SigV4-signed against the Host,
+# so any URL that leaves the container must be signed against a hostname the
+# host browser AND in-network callers both resolve — the traefik minio origin
+# (network aliases minio.localhost + minio.srclode.online on the `clode`
+# bridge), never the internal minio:9000. Single definition, referenced by the
+# s3 anchor below and by vova (which reads its own S3_* names). databend is the
+# sole S3 backend that stays on http://minio:9000 direct — internal storage
+# engine, never presigned — with its own AWS_S3_* env inline on its block.
+x-minio-endpoint: &minio-endpoint ${STACK_SCHEME:-http}://minio.${STACK_DOMAIN:-localhost}${STACK_PORT-:8080}
+
+# Shared S3 client config for the aws-sdk consumers (brahmi, intervix, ikki).
+# Static minio creds + blank AWS_PROFILE (the sibling .env files pin an SSO
+# profile that does not exist in-container and errors the SDK). Path-style is
+# selected in each service's own code off S3_ENDPOINT_URL.
+x-s3-common: &s3-common
+  S3_ENDPOINT_URL:       *minio-endpoint
+  AWS_ACCESS_KEY_ID:     minioadmin
+  AWS_SECRET_ACCESS_KEY: minioadmin
+  AWS_PROFILE:           ""
+
 # Cross-service base URLs. Each consumer reads the subset it cares about;
 # `BRAHMI_URL` vs `BRAHMI_BASE_URL` etc. — different services chose
 # different env names, so we set both.
@@ -142,6 +163,7 @@ x-service-urls: &service-urls
   INTERVIX_BASE_URL:          http://intervix:8080
   NOTIFY_URL:                 http://notify:8080
   NOTIFY_BASE_URL:            http://notify:8080
+  IKKI_GRPC_ADDR:             ikki:7602
 
 # ----------------------------------------------------------------------
 # Admin / pool-owner identity. ONE UUID drives every "who owns the
@@ -651,7 +673,10 @@ services:
     env_file:
       - ../brahmi/.env
     environment:
-      <<: [*db-common, *redis-common, *service-urls, *admin-ids, *allowed-origins, *arambvm]
+      # *s3-common precedes *arambvm so the minio creds win over arambvm's
+      # ec2mock test/test creds (ec2mock ignores them); brahmi's one AWS creds
+      # pair thus serves both its S3 client and the mock EC2 client.
+      <<: [*db-common, *s3-common, *redis-common, *service-urls, *admin-ids, *allowed-origins, *arambvm]
       DB_NAME: brahmi
       DB_SEARCH_PATH: public
       PORT: 9000
@@ -659,16 +684,11 @@ services:
       # CLUSTER_GRPC_ADDR is the peer-dial target other pods write there.
       POD_NAME: brahmi-1
       CLUSTER_GRPC_ADDR: brahmi:9500
-      # STORAGE_BUCKET overrides brahmi/.env's dev value → local bucket.
-      # S3 endpoint goes through traefik because brahmi's presigned URLs
-      # are fetched by the host browser (web-app attachments) and by chil
-      # (in-network, streams blobs to Slack) — SigV4 signs Host, so the
-      # signer and every fetcher must share one origin.
+      # S3 endpoint + creds via *s3-common (traefik origin — presigned URLs are
+      # fetched by the host browser and by chil). STORAGE_BUCKET overrides
+      # brahmi/.env's dev value → local bucket.
       STORAGE_BUCKET:        brahmi-attachments
       STORAGE_REGION:        us-east-1
-      S3_ENDPOINT_URL:       ${STACK_SCHEME:-http}://minio.${STACK_DOMAIN:-localhost}${STACK_PORT-:8080}
-      AWS_ACCESS_KEY_ID:     minioadmin
-      AWS_SECRET_ACCESS_KEY: minioadmin
     labels:
       - traefik.enable=true
       - traefik.http.routers.brahmi.rule=Host(`brahmi.localhost`) || Host(`brahmi.srclode.online`)
@@ -724,7 +744,7 @@ services:
       jumbo: { condition: service_healthy }
     networks: [clode]
     healthcheck:
-      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://127.0.0.1:8080/health/pool || exit 1"]
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://127.0.0.1:8080/health || exit 1"]
       interval: 60s
       timeout: 5s
       retries: 5
@@ -842,7 +862,7 @@ services:
     command: ["sh", "-c", "/app/intervix migrate && exec /app/intervix serve"]
     env_file: [../intervix/.env]
     environment:
-      <<: [*service-urls, *allowed-origins]
+      <<: [*service-urls, *allowed-origins, *s3-common]
       ENVIRONMENT: local
       PORT: 8080
       DATABASE_URL: postgres://postgres:postgres@db:5432/intervix?sslmode=disable
@@ -882,17 +902,13 @@ services:
       INTERVIX_OAUTH_CLIENT_ID:    intervix-local
       INTERVIX_OAUTH_REDIRECT_URI: http://localhost:3001/auth/callback
       INTERVIX_OAUTH_SCOPE:        aramb
-      # Recordings are played back in the recruiter's browser via
-      # presigned URLs — signed against the traefik minio origin so the
-      # same URL works for intervix (signer, in-network) and the browser.
+      # S3 endpoint + creds via *s3-common (traefik origin — recordings are
+      # played back in the recruiter's browser via presigned URLs). Bucket /
+      # region / prefix are intervix's per-service overrides.
       S3_BUCKET:             intervix-recordings
       S3_REGION:             us-east-1
       S3_PREFIX:             intervix
       AWS_REGION:            us-east-1
-      AWS_PROFILE:           ""
-      S3_ENDPOINT_URL:       ${STACK_SCHEME:-http}://minio.${STACK_DOMAIN:-localhost}${STACK_PORT-:8080}
-      AWS_ACCESS_KEY_ID:     minioadmin
-      AWS_SECRET_ACCESS_KEY: minioadmin
     labels:
       - traefik.enable=true
       - traefik.http.routers.intervix.rule=Host(`intervix.localhost`) || Host(`intervix.srclode.online`)
@@ -949,14 +965,15 @@ services:
       # to the in-stack brahmi. Stack-topology only — the provider allow-list
       # itself stays whatever vova's .env sets.
       BRAHMI_WS_URL: ws://brahmi:9000
-      # Non-empty S3_ENDPOINT flips vova into path-style AND scopes the
-      # static creds to the S3 client only — Bedrock keeps the default
-      # AWS chain (AWS_PROFILE / region / secrets from ../vova/.env).
-      # Direct in-network endpoint: the vova-audio bucket is private and
-      # only vova itself reads/writes it — no presigned URLs leave the
-      # container, so no traefik hop needed.
+      # Non-empty S3_ENDPOINT flips vova into path-style AND scopes the static
+      # creds to the S3 client only — Bedrock keeps the default AWS chain
+      # (AWS_PROFILE / region / secrets from ../vova/.env), which is why vova
+      # keeps its own S3_* creds instead of merging *s3-common's AWS_* names.
+      # Endpoint is the shared traefik minio origin (*minio-endpoint): vova
+      # presigns GET URLs the browser streams for audio playback, so the signed
+      # Host must resolve from the browser as well as in-network.
       S3_BUCKET:            vova-audio
-      S3_ENDPOINT:          http://minio:9000
+      S3_ENDPOINT:          *minio-endpoint
       S3_ACCESS_KEY_ID:     minioadmin
       S3_SECRET_ACCESS_KEY: minioadmin
     labels:
@@ -1038,9 +1055,18 @@ services:
       # *admin-ids for ADMIN_USER_IDS — cha-ching's admin usage reads
       # authenticate with an SA token attributed to the raksha-chaching
       # bot user; ikki gates those routes by JWT user.id.
-      <<: [*redis-common, *service-urls, *allowed-origins, *admin-ids]
+      <<: [*db-common, *s3-common, *redis-common, *service-urls, *allowed-origins, *admin-ids]
+      # Browser-session lifecycle webhook target (feat/browser-session-live-view):
+      # ikki POSTs created/ready/cleanup here → brahmi relays over its WS to the
+      # console browser viewer. Empty disables the notifier; this compose override
+      # wins over ../ikki/.env (BRAHMI_URL from *service-urls is http://brahmi:9000).
+      BRAHMI_INTERNAL_URL: http://brahmi:9000
       ENVIRONMENT: local
-      HAS_DB: "false"
+      # Postgres via *db-common (glafa DB_* + HAS_DB); DB_NAME drives DB creation
+      # by the seeder. RECORDING_ENABLED captures Steel recordings to S3.
+      HAS_DB: "true"
+      DB_NAME: ikki
+      RECORDING_ENABLED: "true"
       PORT: 7602
       GRPC_PORT: 7603
       # Logical redis DB 2 (raksha+brahmi=0, mang-proxy=1)
@@ -1062,18 +1088,12 @@ services:
       # ikki.localhost routes via traefik from host AND containers (alias),
       # so agent-side and desktop CDP clients share one URL.
       CDP_BASE_URL: ws://ikki.localhost:8080
-      # STORAGE_BUCKET stores context tarballs (per-user browser profile
-      # blobs); unset = context routes no-op. Direct in-network endpoint:
-      # Steel receives context VALUES inline as JSON (never fetches S3 —
-      # see ikki/internal/provider/steel/provider.go SessionContext), and
-      # the presigned-URL consumers (stealth daemons in browser
-      # containers) are in-network. Nothing external reads this bucket.
+      # S3 endpoint + creds come from *s3-common (traefik minio origin, so the
+      # presigned recording GET URLs ikki mints resolve from the host browser).
+      # STORAGE_BUCKET/REGION are ikki's per-service overrides: the bucket holds
+      # both context tarballs and session recordings.
       STORAGE_BUCKET:        ikki-session-contexts
       STORAGE_REGION:        us-east-1
-      S3_ENDPOINT_URL:       http://minio:9000
-      AWS_ENDPOINT_URL_S3:   http://minio:9000
-      AWS_ACCESS_KEY_ID:     minioadmin
-      AWS_SECRET_ACCESS_KEY: minioadmin
     labels:
       # local-only — ikki was never CF-exposed; do not add a srclode rule.
       - traefik.enable=true
@@ -1660,13 +1680,25 @@ services:
     # in-image cache, and bun's default hardlink backend cannot link across
     # filesystems (it fails mid-extract, e.g. on wrangler). copyfile crosses
     # the boundary reliably.
-    command: ["sh", "-c", "bun install --backend=copyfile && exec bun run dev --host 0.0.0.0"]
+    # dev-entrypoint.sh installs from npm by default; when the workspace selects a
+    # local aramb-sdk-node worktree (LOCAL_SDK=1, mounted at /aramb-sdk-node) it
+    # links that built copy instead — so an unpublished SDK works locally.
+    command: ["sh", "/dev-entrypoint.sh"]
     env_file: [../console-web/.env.local]
+    environment:
+      # "1" only when workspaces.yaml selects an `aramb-sdk-node:` line (up.sh
+      # then exports ARAMB_SDK_NODE_DIR); empty otherwise → npm path, manifest
+      # left as-is. Do NOT hardcode — this is the opt-in switch.
+      LOCAL_SDK: "${ARAMB_SDK_NODE_DIR:+1}"
     ports:
       - "3001:3001"
     volumes:
       - ${CONSOLE_WEB_DIR:-../console-web}:/app
       - console_web_node_modules:/app/node_modules
+      - ./scripts/console-web-dev-entrypoint.sh:/dev-entrypoint.sh:ro
+      # The aramb-sdk-node checkout (worktree when selected, else the main repo —
+      # ignored unless LOCAL_SDK is set). Bind-mounted so the SDK can build in place.
+      - ${ARAMB_SDK_NODE_DIR:-../aramb-sdk-node}:/aramb-sdk-node
     networks: [clode]
     restart: unless-stopped
 

@@ -8,3 +8,5 @@ keys/
 
 # Rolling per-service container logs — runtime output, not source.
 logs/
+
+docker-compose.cache.yml

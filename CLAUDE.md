@@ -235,11 +235,12 @@ against its own DB; no separate registration step.
   middleware is a no-op there.
 
   Consumers whose presigned URLs leave the container (brahmi attachments,
-  intervix recordings) sign against the traefik minio origin
-  (`http://minio.localhost:8080` local / `https://minio.srclode.online`
-  public — network aliases make both resolvable in-network). Backends with
-  no external readers (databend, vova-audio, ikki contexts) stay on
-  `http://minio:9000` direct. Desktop tools: `mc alias set local
+  intervix + ikki recordings, vova audio) sign against the traefik minio
+  origin (`http://minio.localhost:8080` local / `https://minio.srclode.online`
+  public — network aliases make both resolvable in-network), shared via the
+  `x-s3-common` / `x-minio-endpoint` compose anchors. databend is the sole
+  backend that stays on `http://minio:9000` direct (internal storage engine,
+  never presigned) with its own `AWS_S3_*` env. Desktop tools: `mc alias set local
   http://minio.localhost:8080 minioadmin minioadmin`; console at
   `http://minio-console.localhost:8080`.
 
