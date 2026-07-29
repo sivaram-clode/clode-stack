@@ -1,4 +1,4 @@
-package mock
+package aws
 
 import (
 	"encoding/xml"
@@ -209,4 +209,3 @@ func writeError(w http.ResponseWriter, status int, code, msg string) {
 		RequestID: newRequestID(),
 	})
 }
-

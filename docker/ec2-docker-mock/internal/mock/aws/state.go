@@ -1,4 +1,4 @@
-package mock
+package aws
 
 import (
 	"crypto/rand"
@@ -16,14 +16,14 @@ import (
 // instance". The docker container ID is the durable handle — the fake EC2
 // instance ID (`i-<hex>`) is what brahmi sees.
 type InstanceRecord struct {
-	InstanceID   string            // i-<16 hex>
-	ContainerID  string            // docker container id
-	ImageID      string            // AMI id brahmi asked for (returned as-is)
-	InstanceType string            // returned as-is
+	InstanceID   string // i-<16 hex>
+	ContainerID  string // docker container id
+	ImageID      string // AMI id brahmi asked for (returned as-is)
+	InstanceType string // returned as-is
 	Tags         map[string]string
 	LaunchTime   time.Time
-	Spot         bool  // true if RunInstances came from a spot request
-	Hibernated   bool  // set by StopInstances(Hibernate=true)
+	Spot         bool   // true if RunInstances came from a spot request
+	Hibernated   bool   // set by StopInstances(Hibernate=true)
 	VolumeName   string // named docker volume mounted at $BENJI_HOME (for stop/start persistence)
 }
 
@@ -90,6 +90,7 @@ func (s *State) Filter(filters map[string][]string) []*InstanceRecord {
 //     (looked up separately; here we only match filters that are tag-based).
 //   - tag:<key> — value must appear in the record's tags for that key.
 //   - tag-key — record must have any of the requested keys.
+//
 // State-based filters ("instance-state-name") are honored by the caller after
 // resolving via docker inspect.
 func matchFilters(r *InstanceRecord, filters map[string][]string) bool {

@@ -1,4 +1,4 @@
-package mock
+package aws
 
 import (
 	"context"
@@ -49,7 +49,7 @@ type runContainerParams struct {
 
 // pullIfMissing honors the configured PullPolicy:
 //   - Never          → skip pull entirely; ContainerCreate fails cleanly if
-//                      the image isn't on the daemon (matches k8s Never).
+//     the image isn't on the daemon (matches k8s Never).
 //   - IfNotPresent   → inspect first; pull only when absent locally.
 //   - Always         → pull every time even if already present.
 //
@@ -335,4 +335,3 @@ func isNoSuchVolume(err error) bool {
 	msg := strings.ToLower(err.Error())
 	return strings.Contains(msg, "no such volume") || strings.Contains(msg, "not found")
 }
-

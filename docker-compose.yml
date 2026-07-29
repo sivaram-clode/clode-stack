@@ -643,6 +643,12 @@ services:
       # so locally-built kairo images at `clode-stack/benji:latest` (from
       # ./stack.sh up --agent) skip the registry HEAD probe.
       PLATFORM_REPO: clode-stack
+      # Route deployment batches at the always-up ec2mock deployer facade (its
+      # /narnia group pulls config back + posts the status callback), so a
+      # default stack completes jumbo deploys without the real narnia +
+      # narnia-workers + argocd chain. `--profile deploy` (real narnia) instead:
+      # export NARNIA_BASE_URL=http://narnia:8081 before `./stack.sh up`.
+      NARNIA_BASE_URL: ${NARNIA_BASE_URL:-http://ec2mock:8080/narnia}
     labels:
       - traefik.enable=true
       - traefik.http.routers.jumbo.rule=Host(`jumbo.localhost`) || Host(`jumbo.srclode.online`)
@@ -726,8 +732,16 @@ services:
       ENVIRONMENT: local
       DB_NAME: pool-manager
       PORT: 8080
-      LOCAL_MODE: "true"
+      # Cloud/jumbo-deployer mode: pool-manager deploys agents via jumbo
+      # (→ ec2mock's /narnia group) and polls health via ec2mock's /baghira
+      # group — one deployer for the whole stack instead of pool-manager
+      # docker-running agents itself. (LOCAL_MODE=true reverts to direct
+      # `docker run` + docker-inspect health, bypassing jumbo/narnia/baghira.)
+      LOCAL_MODE: "false"
       DOCKER_NETWORK: clode
+      # JUMBO_BASE_URL inherits from the *service-urls anchor (http://jumbo:8080).
+      # BAGHIRA_BASE_URL points at the always-up ec2mock /baghira group.
+      BAGHIRA_BASE_URL: http://ec2mock:8080/baghira
       # BRAHMI_URL / BRAHMI_BASE_URL / BRAHMI_WS_URL inherit from the
       # *service-urls anchor (http://brahmi:9000, ws://brahmi:9000).
     volumes:
@@ -1559,12 +1573,19 @@ services:
     restart: unless-stopped
 
   # ------------------------------------------------------------------
-  # ec2mock — local EC2 wire-protocol stand-in that translates the subset
-  # of EC2 API calls brahmi's aramb-vm provider makes into `docker`
-  # operations against the host daemon. Brahmi's AWS SDK client resolves
-  # AWS_ENDPOINT_URL_EC2 natively (no brahmi code changes), so pointing
-  # it at http://ec2mock:8080 makes every RunInstances → docker create,
-  # StopInstances → docker stop, etc.
+  # ec2mock — unified local docker-deployer. Always up (no profile). One
+  # HTTP server fronts three API groups against the host daemon:
+  #   aws     — EC2 wire protocol for brahmi's aramb-vm provider
+  #             (RunInstances → docker create, StopInstances → docker stop, …).
+  #             brahmi's AWS SDK resolves AWS_ENDPOINT_URL_EC2 natively.
+  #   /narnia — jumbo's deployer facade: a deployment batch pulls the service
+  #             config back from jumbo (JUMBO_BASE_URL), runs/stops the
+  #             container with the k8s DNS aliases, and posts the terminal
+  #             status callback — so default-stack jumbo deploys (brahmi scale,
+  #             pool-manager cloud mode, normal services) complete with no real
+  #             narnia/narnia-workers/argocd. jumbo → NARNIA_BASE_URL above.
+  #   /baghira — pod status: GET /api/v1/replicas from live container state;
+  #             pool-manager (LOCAL_MODE=false) → BAGHIRA_BASE_URL above.
   #
   # Docker socket bind: required — the mock creates real containers on the
   # HOST daemon. Runs as root inside the container because it needs to
@@ -1588,6 +1609,11 @@ services:
     # them would 401. Build them locally with `./stack.sh up --agent`
     # and rely on whatever's on the daemon.
     command: ["--addr", ":8080", "--network", "clode", "--pull-policy", "Never"]
+    environment:
+      # The /narnia group pulls each deployment's config from jumbo and posts
+      # status callbacks back to it. Lazy — only dialed when a deploy arrives,
+      # so no depends_on (avoids a jumbo↔ec2mock cycle).
+      JUMBO_BASE_URL: http://jumbo:8080
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
     labels:
