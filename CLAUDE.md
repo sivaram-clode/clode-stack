@@ -178,18 +178,21 @@ against its own DB; no separate registration step.
   `REDIS_PASSWORD`, so redis runs with `--requirepass clode-redis-local`.
   mang-proxy uses DB 1; raksha + brahmi use DB 0 — keeps
   `cleanup --redis` independent of `cleanup --redis-mang`.
-- **Two classes of agent containers live outside compose.** (a) pool-manager
-  in `LOCAL_MODE=true` mounts `/var/run/docker.sock` and `docker run`s
-  kairo containers on the `clode` bridge. (b) ec2mock spawns aramb-vm
-  containers named `i-<hex>` for RunInstances and labels each with
-  `aws.mock.instance-id` + creates a named volume labeled
-  `aws.mock.owned=true`. Compose can't see either. `scripts/lib/agent-sweep.sh`
-  centralises the sweep — cleanup.sh's `--agents` and wipe.sh both call
-  through it (containers by label ∪ image ∩ `network=clode`; volumes by
-  label). Image resolution unions ec2mock's `GET /_admin/config/default-image`,
-  `data/pool-manager-svc-configs.json`, `$BENJI_IMAGE`, and the three
-  static local tier tags (`clode-stack/benji:{dev,vm,voice}`) so containers
-  launched under a previous `--agent` mode still get swept.
+- **Agent + service containers live outside compose.** All are created by
+  ec2mock (the unified deployer), which owns three container populations on the
+  `clode` bridge: (a) aramb-vm instances named `i-<hex>` from the `aws` group's
+  RunInstances, labeled `aws.mock.instance-id` + a named volume labeled
+  `aws.mock.owned=true`; (b) services deployed by the `/narnia` group (agent
+  pool warm, brahmi scale, normal services — pool-manager runs `LOCAL_MODE=false`
+  so it deploys via jumbo→ec2mock rather than `docker run`ing itself), named by
+  slug and labeled `aws.mock.service-id` + `aws.mock.deployed-service`; (c) any
+  legacy pool-manager `LOCAL_MODE=true` `kairo-*` containers. Compose can't see
+  any of them. `scripts/lib/agent-sweep.sh` centralises the sweep — cleanup.sh's
+  `--agents` and wipe.sh both call through it (containers by label ∪ image ∩
+  `network=clode`; volumes by label). Image resolution unions ec2mock's
+  `GET /_admin/config/default-image`, `data/pool-manager-svc-configs.json`,
+  `$BENJI_IMAGE`, and the static local tier tags so containers launched under a
+  previous `--agent` mode still get swept.
 - **`x-admin-ids` UUIDs move as a unit.** The admin UUID and the
   raksha-chaching bot UUID each live under several names: the admin org/user
   drives `ADMIN_USER_ID(S)` / `ADMIN_ORG_ID(S)` / `POOL_OWNER_ID` /

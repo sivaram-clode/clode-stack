@@ -51,6 +51,10 @@ _AGENT_SWEEP_SH_LOADED=1
 # containerLabelInstanceID in ec2-docker-mock/internal/mock/docker.go).
 : "${EC2MOCK_INSTANCE_LABEL:=aws.mock.instance-id}"
 
+# Container label ec2mock's /narnia group stamps on every service container it
+# deploys (mirrors deploy.LabelDeployed in the ec2-docker-mock deploy package).
+: "${EC2MOCK_DEPLOYED_LABEL:=aws.mock.deployed-service}"
+
 # Volume label ec2mock stamps on every named volume it creates (mirrors
 # labelValueTrue + "aws.mock.owned" in ensureVolume).
 : "${EC2MOCK_VOLUME_LABEL:=aws.mock.owned=true}"
@@ -108,6 +112,14 @@ _agent_container_ids() {
     --filter "label=${EC2MOCK_INSTANCE_LABEL}" \
     --filter "network=${AGENT_NETWORK}" 2>/dev/null)
 
+  # Set A2: services deployed via ec2mock's /narnia group (label-based,
+  # image-agnostic). Separate `docker ps` because multiple `--filter label`
+  # AND-combine; this OR-unions with set A via the final sort -u.
+  local a2_ids
+  a2_ids=$(docker ps -aq \
+    --filter "label=${EC2MOCK_DEPLOYED_LABEL}" \
+    --filter "network=${AGENT_NETWORK}" 2>/dev/null)
+
   # Set B: containers matching any pool-manager image (image-based).
   # Multiple `--filter ancestor=` are OR'd by docker; the network filter
   # AND-combines. Skip the call entirely if no images resolved.
@@ -131,7 +143,7 @@ _agent_container_ids() {
     --filter "name=kairo-" \
     --filter "network=${AGENT_NETWORK}" 2>/dev/null)
 
-  printf '%s\n%s\n%s\n' "$a_ids" "$b_ids" "$c_ids" | awk 'NF' | sort -u
+  printf '%s\n%s\n%s\n%s\n' "$a_ids" "$a2_ids" "$b_ids" "$c_ids" | awk 'NF' | sort -u
 }
 
 # sweep_agent_containers [dry_run]: remove every agent container.

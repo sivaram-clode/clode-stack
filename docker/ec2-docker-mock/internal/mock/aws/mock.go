@@ -1,5 +1,8 @@
-// Package mock implements the EC2-wire-to-docker translation.
-package mock
+// Package aws implements the EC2-wire-to-docker translation — the `aws` API
+// group of the unified deployer. It exposes ServeEC2 (the EC2 query protocol)
+// and ServeAdmin (the /_admin control plane) for mounting under the server's
+// route groups, and shares its docker client with the narnia + baghira groups.
+package aws
 
 import (
 	"context"
@@ -121,17 +124,28 @@ func (m *Mock) Close() error { return m.docker.Close() }
 // pool-manager's svc_configs). GET /health is a plain liveness probe used by
 // compose healthchecks and the `-healthcheck` self-check subcommand.
 func (m *Mock) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path == "/health" && (r.Method == http.MethodGet || r.Method == http.MethodHead) {
+	switch {
+	case r.URL.Path == "/health" && (r.Method == http.MethodGet || r.Method == http.MethodHead):
 		w.Header().Set("Content-Type", "application/json")
 		if r.Method == http.MethodGet {
 			_, _ = w.Write([]byte(`{"status":"ok"}`))
 		}
-		return
+	case strings.HasPrefix(r.URL.Path, "/_admin/"):
+		m.ServeAdmin(w, r)
+	default:
+		m.ServeEC2(w, r)
 	}
-	if strings.HasPrefix(r.URL.Path, "/_admin/") {
-		m.serveAdmin(w, r)
-		return
-	}
+}
+
+// Docker returns the shared docker client so sibling API groups (narnia,
+// baghira) drive the same daemon connection rather than dialing their own.
+func (m *Mock) Docker() *client.Client { return m.docker }
+
+// ServeEC2 handles the EC2 query-protocol surface: a POST with a
+// form-urlencoded body carrying Action=<verb>&Version=<v>&<params>. It is the
+// http.Handler mounted under the `aws` route group (root + /aws) — the SDK
+// dials the endpoint root, so behavior is unchanged from a bare EC2 endpoint.
+func (m *Mock) ServeEC2(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "only POST /", http.StatusMethodNotAllowed)
 		return
@@ -242,7 +256,7 @@ func (s *statusRecorder) WriteHeader(code int) {
 //	GET /_admin/config
 //	  Returns the full adminConfig JSON. Kept as the "everything" view
 //	  once more knobs land here.
-func (m *Mock) serveAdmin(w http.ResponseWriter, r *http.Request) {
+func (m *Mock) ServeAdmin(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case r.Method == http.MethodPut && r.URL.Path == "/_admin/config/default-image":
 		var body struct {
@@ -274,4 +288,3 @@ func (m *Mock) serveAdmin(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 	}
 }
-

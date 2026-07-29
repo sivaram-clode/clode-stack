@@ -1,125 +1,211 @@
-# ec2-docker-mock
+# ec2-docker-mock — unified local docker-deployer
 
-A minimal AWS EC2 API server that translates a small subset of the EC2 wire
-protocol into `docker` operations against a bind-mounted daemon socket. Point
-an `aws-sdk-go-v2` EC2 client at it — via `AWS_ENDPOINT_URL_EC2` — and
-"launching an EC2 instance" becomes `docker create + start` on your host.
+A single Go service that stands in for the platform's whole deploy/runtime
+plane on a local machine, backed by the **host docker daemon**. One HTTP server
+fronts three self-identifying API groups:
 
-Written to let brahmi's `aramb-vm` provider run end-to-end locally without an
-AWS account: **zero code changes on the brahmi side**, just env.
+| Group | Prefix | Stands in for | Used by |
+|-------|--------|---------------|---------|
+| **aws** | `/` (+ `/aws`) | the EC2 API | brahmi's aramb-vm provider (`AWS_ENDPOINT_URL_EC2`) |
+| **narnia** | `/narnia/*` | narnia + narnia-workers (the k8s deployer) | jumbo (`NARNIA_BASE_URL`) |
+| **baghira** | `/baghira/*` | baghira (pod status) | pool-manager (`BAGHIRA_BASE_URL`) |
 
-## Actions implemented
+Together they let the local stack run the full **jumbo → narnia → baghira**
+deploy path — agent pool warm, brahmi scale up/down, and normal service
+deploys — without running any real k8s (no narnia, narnia-workers, k3s/argocd,
+baghira, or baghira-proxy). **jumbo stays the sole book-keeper; this binary is
+the "cluster".**
 
-| EC2 action | Maps to | Notes |
-|---|---|---|
-| `RunInstances` | `docker create + start` | `AGENT_IMAGE` (parsed from cloud-init user-data) picks the actual image; `ImageId` is echoed back. A named docker volume is mounted at `/home/node/.benji` so `$BENJI_HOME` persists across stop/start. |
-| `DescribeInstances` | `docker inspect` + tag filters | Honors `InstanceId.N`, `Filter.N.Name=tag:<k>` and `Filter.N.Name=instance-state-name`. |
-| `StopInstances` | `docker stop` | With `Hibernate=true` → `docker pause` (cgroup-freezer analogue of EC2 hibernate). |
-| `StartInstances` | `docker start` / `docker unpause` | Hibernated records take the unpause path. |
-| `TerminateInstances` | `docker rm -f` | Volume is retained unless the caller passes `X-EC2Mock-RemoveVolume=true`. |
-| `RebootInstances` | stop + start | |
-| `CancelSpotInstanceRequests` | no-op success | Spot lifecycle isn't modeled. |
-| `DescribeInstanceAttribute` | skeleton response | Enough for hibernation-eligibility probes. |
-| `DescribeSubnets`, `DescribeSecurityGroups` | empty result set | Stubs — so a stray `AGENT_VM_SUBNET_SELECTOR` / `AGENT_VM_SG_SELECTOR` on the caller doesn't 501 the launch. |
+Plus the original job: translating brahmi's EC2 calls into docker operations.
 
-Not implemented: everything else (VPC lifecycle, IAM, EBS, spot fleet, ELB…).
-The mock accepts unrecognised actions with `HTTP 501 UnsupportedAction`.
+---
 
-Signatures are ignored — the mock trusts callers. Do not expose it outside a
-private network.
+## Why
 
-## Run it
+In the local `clode-stack`, after brahmi claims an agent it asks jumbo to
+scale it (a normal jumbo deployment). jumbo writes a `deployments` row
+(default status `accepted`) and POSTs a batch to `NARNIA_BASE_URL`. With no
+narnia running, that POST fails and the row is stuck at `accepted` forever —
+nothing ever calls jumbo back to advance it. Standing up the real k8s chain
+(5 services + argocd) just to unstick this is far too heavy for a laptop.
 
-### With docker
+This deployer replaces that chain with one always-up container that speaks the
+same contracts.
 
-```bash
-docker build -t ec2-docker-mock .
+---
 
-docker run --rm -d \
-  --name ec2mock \
-  --network clode \
-  -v /var/run/docker.sock:/var/run/docker.sock \
-  ec2-docker-mock \
-  --addr :8080 \
-  --network clode
+## How a deploy flows
+
+The narnia batch jumbo sends is **metadata only** — no image/env/ports. The
+deployer pulls the real config back from jumbo, then acts:
+
+```
+jumbo ──POST /narnia/internal/deployments/batch──▶ ec2mock (201, async)
+                                                      │
+        ◀──GET /internal/deployments/:id/config────── │   (image, vars, secrets, regions[0].replicas)
+                                                      │
+                                          replicas 0 → docker rm  |  ≥1 → docker run
+                                                      │
+        ◀──PUT /internal/deployments/:id/status────── │   status=completed + PRIVATE_URL
 ```
 
-- `-v /var/run/docker.sock:/var/run/docker.sock` — required. The mock talks to
-  the host daemon to create/inspect the "instance" containers.
-- `--network clode` (compose flag) — the mock's own container joins this bridge
-  so callers on the same bridge can reach it as `ec2mock:8080`.
-- `--network clode` (mock flag, distinct) — every launched "instance"
-  container joins this bridge. Use the same value as above so brahmi can dial
-  the returned `PrivateIP` directly.
+`status=completed` is what moves the deployment out of `accepted`; jumbo then
+persists the outputs and bumps the service version.
 
-Bind to the host if you want to hit it from outside compose:
-`-p 4566:8080` and point clients at `http://localhost:4566`.
+### k8s-derivable DNS, faked with a docker alias
 
-### From source
+In-cluster, consumers dial a service at `{slug}-backend-main.{slug}.svc:{port}`
+(e.g. ikki's browser CDP probe). Each deployed container is therefore given
+docker **network aliases** so that exact name resolves on the shared `clode`
+bridge — no consumer code changes:
 
-```bash
-go build -o bin/ec2mock ./cmd/ec2mock
-./bin/ec2mock --addr :4566 --network bridge
+- `{slug}-backend-main.{slug}.svc`  — the in-cluster service DNS name
+- `{slug}.clode.internal`           — the private host jumbo stores in `PRIVATE_URL`
+
+### One container per service — three docker primitives
+
+| Concern | Primitive | Value |
+|---------|-----------|-------|
+| human / DNS name | container **name** | the service **slug** |
+| id lookup (baghira) | label `aws.mock.service-id` | jumbo service **uuid** |
+| ownership (sweep) | label `aws.mock.deployed-service=true` | — |
+| k8s DNS | network **aliases** | `{slug}-backend-main.{slug}.svc`, `{slug}.clode.internal` |
+
+baghira's `?serviceIdentifier=<uuid>&idType=id` is then a one-line label query
+— no in-memory registry, and it survives a restart because **docker is the
+store**.
+
+---
+
+## API
+
+### aws group — EC2 wire protocol → docker
+
+`POST /` (form-urlencoded `Action=…`), responses in EC2 XML. Signatures are
+ignored (localhost, no auth surface).
+
+| Action | docker |
+|--------|--------|
+| `RunInstances` | `docker create` + `start` (named `i-<hex>`) |
+| `StopInstances` | `docker stop` (or `pause` when `Hibernate=true`) |
+| `StartInstances` | `docker start` (or `unpause`) |
+| `TerminateInstances` | `docker rm -f` |
+| `RebootInstances` | `docker restart` |
+| `DescribeInstances` | live state, honoring `InstanceId.N` + `Filter.N` |
+| `DescribeSubnets` / `DescribeSecurityGroups` | empty set (leave the brahmi selectors unset) |
+
+Plus an out-of-band JSON control plane:
+
+- `PUT /_admin/config/default-image` `{"image":"<ref>"}` — image `RunInstances` launches
+- `GET /_admin/config/default-image` — readback (clode-stack's sweep scripts read this)
+- `GET /_admin/config` — full admin config
+
+### narnia group — deployer facade
+
+- `POST /narnia/internal/deployments/batch` — acks `201` immediately, then per
+  deployment (async): pull config → `replicas==0` stop / `≥1` run with the DNS
+  aliases → status callback (`completed` + `PRIVATE_URL`, or `failed`).
+- `POST /narnia/internal/deletion-jobs` and `/bulk` — stop/remove by service id.
+
+### baghira group — pod status
+
+- `GET /baghira/api/v1/replicas?serviceIdentifier=<uuid>&idType=id` →
+  `{"status":"SUCCESS","data":[{"status":"Running","ready":"1/1", …}]}`.
+  Empty `data` when the service isn't deployed (pool-manager reads that as
+  "not healthy yet").
+
+### Liveness
+
+- `GET /health` → `{"status":"ok"}`
+
+---
+
+## Layout
+
+```
+cmd/ec2mock/main.go     minimal entrypoint: config → build groups → serve
+internal/
+  config/               flags + env → Config
+  server/               the Fiber app: route groups + per-group scoped logging
+  deploy/               shared docker service-deployer (run/stop/replicas by label)
+  mock/                 the services this binary IMPERSONATES (inbound APIs)
+    aws/                the EC2-to-docker engine (mounted via net/http adaptor)
+    narnia/             deploy / delete / status-callback handlers
+    baghira/            replicas handler
+  client/               the services this binary CALLS (outbound)
+    jumbo/              tiny client: GET config, PUT status
 ```
 
-Flags:
-- `--addr :8080` — listen address.
-- `--docker-socket` — override the daemon socket path. Empty defers to
-  `DOCKER_HOST` env, then `/var/run/docker.sock`.
-- `--network bridge` — docker network launched containers attach to. Match
-  this to the network the *caller* (e.g. brahmi) sits on so the returned IP
-  is reachable.
-- `--entrypoint-override` — path to a shim entrypoint. Use this for images
-  whose baked entrypoint expects systemd/cloud-init to be present (the real
-  aramb-vm AMI does). The shim can `source /etc/clode-agent/agent.env` and
-  exec the intended binary.
+`mock/*` is what we answer *as*; `client/*` is what we reach *out to*. `deploy`
+is the shared docker engine the mocks place containers through.
 
-## Wiring brahmi's aramb-vm provider
+Logs are group-scoped, e.g.:
 
-Set these on the brahmi service. Every one is a pre-existing knob — the mock
-requires no brahmi code change.
-
-| Var | Value | Purpose |
-|---|---|---|
-| `AWS_ENDPOINT_URL_EC2` | `http://ec2mock:8080` | Native `aws-sdk-go-v2` endpoint override (config ≥ v1.27, brahmi is on v1.32.7). |
-| `AWS_ACCESS_KEY_ID` | any dummy (e.g. `test`) | SDK credential-chain must resolve to *something*; the mock never checks the signature. |
-| `AWS_SECRET_ACCESS_KEY` | any dummy | Same. |
-| `AWS_REGION` | `us-east-1` (any) | SDK region default. |
-| `AGENT_VM_REGION` | `us-east-1` (any) | brahmi's own `New()` gate. |
-| `AGENT_VM_CLODE_ENV` | `local` | Mandatory tagging isolation key. |
-| `AGENT_VM_AMI_ID` | `ami-mock-000000` (any) | Cosmetic — the mock prefers `AGENT_IMAGE` from cloud-init user-data. Must be non-empty. |
-| `AGENT_VM_SUBNET_SELECTOR` | *(unset / empty)* | Mock returns empty; setting a selector would match no subnet. |
-| `AGENT_VM_SG_SELECTOR` | *(unset / empty)* | Same. |
-| `AGENT_VM_INSTANCE_PROFILE` | *(unset)* | IAM is a no-op locally. |
-| `AGENT_VM_SPOT_ENABLED` | `false` (recommended) | Avoids brahmi's spot-vs-hibernation interruption dance. `true` also works — the mock treats spot as a passthrough label. |
-| `AGENT_PROVIDER` | `aramb-vm` (or org allow-list) | Routes cloud provision through the VM path. |
-
-Pool `service_configurations.vars` still supplies `AGENT_IMAGE` — that's the
-docker image the mock actually runs. For local, use whatever `benji` / kairo
-image you have on the daemon (or one built from the aramb-vm bootstrap image
-with the `--entrypoint-override` shim).
-
-## What it does NOT do
-
-- **No persistence across restart.** State is in-memory. On boot the mock
-  rehydrates its record set from `docker ps -a --filter label=aws.mock.instance-id`
-  (`Rehydrate()` in `state.go`), so containers survive a mock restart cleanly.
-  It does *not* preserve VPC/subnet/SG lookup tables (there aren't any).
-- **No signature validation.** Anyone who can reach the port can drive it.
-- **No spot lifecycle.** `spotInstanceRequestId` is never emitted, so callers
-  that dive into it (brahmi's `CancelSpotRequest` does) find nothing and
-  silently no-op — matching the on-demand code path.
-- **No `DescribeSubnets` / `DescribeSecurityGroups` beyond empty sets.**
-  A tag-selector that expects a match will fail on the *caller* side (brahmi
-  errors "no subnet matched selector"); leave the selectors unset.
-
-## Testing
-
-```bash
-go test ./...
-
-# Full docker-daemon lifecycle test (skipped if docker isn't reachable):
-go test ./internal/mock/ -run TestE2E_LifecycleAgainstRealDocker -v
+```
+[aws] POST / -> 200 (10ms)
+[narnia] deployed smoke-svc (service=… image=nginx:alpine port=80)
+[baghira] GET /baghira/api/v1/replicas?… -> 200 (3ms)
 ```
 
-Set `EC2MOCK_SKIP_E2E=1` to force-skip the docker-touching test in CI.
+---
+
+## Configuration
+
+Flags (with env fallbacks):
+
+| Flag | Env | Default | Purpose |
+|------|-----|---------|---------|
+| `--addr` | `EC2MOCK_ADDR` | `:8080` | listen address |
+| `--network` | — | `bridge` | docker network launched containers attach to |
+| `--pull-policy` | — | `IfNotPresent` | `IfNotPresent` \| `Always` \| `Never` |
+| `--docker-socket` | — | (DOCKER_HOST / `/var/run/docker.sock`) | daemon socket |
+| `--entrypoint-override` | — | — | replace the image entrypoint on aws launches |
+| `--jumbo-base-url` | `JUMBO_BASE_URL` | `http://jumbo:8080` | jumbo, for narnia config-pull + status |
+
+`--pull-policy Never` is the right choice when images live under a local-only
+namespace (`clode-stack/*`) — a pull would hit Docker Hub and 401.
+
+---
+
+## In clode-stack
+
+`ec2mock` is **always up** (no compose profile). Wiring in `docker-compose.yml`:
+
+- `ec2mock`: `command: [--network clode --pull-policy Never]`, `JUMBO_BASE_URL=http://jumbo:8080`, host docker socket bind-mounted.
+- `jumbo`: `NARNIA_BASE_URL=${NARNIA_BASE_URL:-http://ec2mock:8080/narnia}` (override to `http://narnia:8081` for `--profile deploy` real narnia).
+- `pool-manager`: `LOCAL_MODE=false`, `BAGHIRA_BASE_URL=http://ec2mock:8080/baghira`.
+- `brahmi`: `AWS_ENDPOINT_URL_EC2=http://ec2mock:8080` (aramb-vm path).
+
+`scripts/seed.sh` PUTs the kairo image to `/_admin/config/default-image`, and
+`scripts/lib/agent-sweep.sh` reclaims every container labelled `aws.mock.*`
+(including `aws.mock.deployed-service`).
+
+---
+
+## Build, run, test
+
+```bash
+make build            # -> bin/ec2mock
+make run              # build + run (:8080)
+make test             # unit + e2e (e2e needs a reachable docker daemon)
+make test-unit        # EC2MOCK_SKIP_E2E=1 go test ./...
+make test-e2e         # full Run/Stop/Start/Hibernate/Terminate against real docker
+make vet
+```
+
+### Standalone (outside clode-stack)
+
+```bash
+docker network create demo
+./bin/ec2mock --addr :18099 --network demo --jumbo-base-url http://127.0.0.1:8080
+
+# aws
+aws --endpoint-url http://localhost:18099 ec2 describe-instances
+
+# narnia (jumbo must serve /internal/deployments/:id/config + /status)
+curl -X POST localhost:18099/narnia/internal/deployments/batch \
+  -d '{"batch_id":"b1","deployments":[{"deployment_id":"<id>"}]}'
+
+# baghira
+curl 'localhost:18099/baghira/api/v1/replicas?serviceIdentifier=<uuid>&idType=id'
+```

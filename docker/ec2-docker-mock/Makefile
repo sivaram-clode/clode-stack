@@ -11,7 +11,7 @@ test-unit:
 	EC2MOCK_SKIP_E2E=1 go test ./...
 
 test-e2e:
-	go test -run TestE2E -v ./internal/mock/
+	go test -run TestE2E -v ./internal/aws/
 
 vet:
 	go vet ./...
