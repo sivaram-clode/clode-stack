@@ -163,7 +163,7 @@ x-service-urls: &service-urls
   INTERVIX_BASE_URL:          http://intervix:8080
   NOTIFY_URL:                 http://notify:8080
   NOTIFY_BASE_URL:            http://notify:8080
-  IKKI_GRPC_ADDR:             ikki:7602
+  IKKI_GRPC_ADDR:             ikki:7603
 
 # ----------------------------------------------------------------------
 # Admin / pool-owner identity. ONE UUID drives every "who owns the
@@ -1081,6 +1081,13 @@ services:
       HAS_DB: "true"
       DB_NAME: ikki
       RECORDING_ENABLED: "true"
+      # In-house recorder mints part URLs against ikki over the clode bridge —
+      # the browser container dials ikki by service name (ikki's HTTP PORT).
+      RECORDING_MINT_URL_BASE: http://ikki:7602
+      # Local aramb provider targets — ikki's repo .env ships dev-aramb-stub:0
+      # placeholders; point them at the real in-stack services (clode bridge).
+      ARAMB_JUMBO_BASE_URL: http://jumbo:8080
+      ARAMB_POOL_MANAGER_URL: http://pool-manager:8080
       PORT: 7602
       GRPC_PORT: 7603
       # Logical redis DB 2 (raksha+brahmi=0, mang-proxy=1)
@@ -1088,13 +1095,13 @@ services:
       REDIS_KEY_PREFIX: "ikki:"
       # Steel-only — every other provider off. ikki/.env keeps DOCKER+LOUIE on
       # for its e2e compose; we force them off here.
-      STEEL_ENABLED: "true"
+      STEEL_ENABLED: "false"
       DOCKER_PROVIDER_ENABLED: "false"
       LOUIE_ENABLED: "false"
       HARBOR_ENABLED: "false"
       JUMBO_ENABLED: "false"
       BROWSER_BASE_ENABLED: "false"
-      ARAMB_ENABLED: "false"
+      ARAMB_ENABLED: "true"
       # CheckDependencies only probes RAKSHA_URL when Jumbo/Harbor are on, so
       # this is cosmetic for steel-only — set anyway for consistency.
       RAKSHA_URL: http://raksha:8080
@@ -1716,6 +1723,13 @@ services:
       # then exports ARAMB_SDK_NODE_DIR); empty otherwise → npm path, manifest
       # left as-is. Do NOT hardcode — this is the opt-in switch.
       LOCAL_SDK: "${ARAMB_SDK_NODE_DIR:+1}"
+      # ikki (browser-session manager) base for the Browser tab's recording
+      # fetch. env.ts uses this as the BROWSER's absolute ikki base (not just a
+      # server-side proxy target), so it must be reachable from the host browser
+      # AND CORS-allowed by ikki. The traefik `ikki.localhost:8080` router fits
+      # (ikki's ALLOWED_ORIGINS includes localhost:3001). An in-network address
+      # like ikki:7602 breaks here — the host browser can't resolve it.
+      VITE_IKKI_BASE_URL: http://ikki.localhost:8080
     ports:
       - "3001:3001"
     volumes:
