@@ -62,6 +62,7 @@ clode-stack/
 ./stack.sh up --public         # + cloudflared edge (webhooks, OAuth installs, external MCP clients)
 ./stack.sh up jumbo brahmi     # subset; seeder skipped on partial bring-ups
 ./stack.sh up --agent          # + build the full benji agent image (../benji/Dockerfile) and flip brahmi to aramb-vm
+./stack.sh up --browser        # + build the brave-head browser image (../agent-base-docker/brave-headed) for the aramb-browser pool; pair with --profile browser for ikki
 ./stack.sh down                # stop; preserves volumes/images/buildkit cache
 ./stack.sh wipe                # total teardown (agents + volumes + images + buildkit) — prompts y/N
 ./stack.sh cleanup             # truncate data in place — see `stack.sh cleanup -h`
@@ -190,9 +191,12 @@ against its own DB; no separate registration step.
   any of them. `scripts/lib/agent-sweep.sh` centralises the sweep — cleanup.sh's
   `--agents` and wipe.sh both call through it (containers by label ∪ image ∩
   `network=clode`; volumes by label). Image resolution unions ec2mock's
-  `GET /_admin/config/default-image`, `data/pool-manager-svc-configs.json`,
-  `$BENJI_IMAGE`, and the static local tier tags so containers launched under a
-  previous `--agent` mode still get swept.
+  `GET /_admin/config/default-image`, `data/pool-manager-svc-configs.json`
+  (every `.configs[].settings.image`, including the `aramb-browser` row),
+  `$BENJI_IMAGE` / `$BROWSER_IMAGE`, and the static local tier tags
+  (`clode-stack/benji:{latest,dev,vm,voice,slim}` + `clode-stack/brave-head:latest`)
+  so containers launched under a previous `--agent` / `--browser` build still
+  get swept.
 - **`x-admin-ids` UUIDs move as a unit.** The admin UUID and the
   raksha-chaching bot UUID each live under several names: the admin org/user
   drives `ADMIN_USER_ID(S)` / `ADMIN_ORG_ID(S)` / `POOL_OWNER_ID` /

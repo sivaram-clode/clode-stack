@@ -114,9 +114,10 @@ _stack_complete() {
         fi
         return
       fi
-      # Flags this subcommand accepts.
+      # Flags this subcommand accepts (tail-logs ignores the build/mode ones,
+      # but offering them is harmless — up.sh is the real parser).
       if [[ "$cur" == -* ]]; then
-        COMPREPLY=( $(compgen -W "--batch --profile" -- "$cur") )
+        COMPREPLY=( $(compgen -W "--batch --profile --public --agent --browser --state" -- "$cur") )
         return
       fi
       # Otherwise positional args are service names; allow repeats.

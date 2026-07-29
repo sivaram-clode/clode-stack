@@ -379,15 +379,22 @@ fi
 # in the row as-is for parity with prod.
 if in_scope pool-manager; then
   KAIRO_JSON=data/pool-manager-svc-configs.json
-  # up.sh's --agent flag exports BENJI_IMAGE=clode-stack/benji:<mode>.
-  # When set, that value overrides the JSON's settings.image on every row
-  # so the pool-manager svc_configs match the actually-built image tag.
-  # Unset → JSON default (`clode-stack/benji:vm`) wins.
-  KAIRO_JQ_FILTER='.configs[]'
-  if [[ -n "${BENJI_IMAGE:-}" ]]; then
-    say "pool-manager: overriding svc_configs image with BENJI_IMAGE=${BENJI_IMAGE} (--agent-built)"
-    KAIRO_JQ_FILTER='.configs[] | .settings.image = env.BENJI_IMAGE'
-  fi
+  # up.sh's build flags export the tag they actually built:
+  #   --agent   → BENJI_IMAGE=clode-stack/benji:latest    (kairo* rows)
+  #   --browser → BROWSER_IMAGE=clode-stack/brave-head:latest (aramb-browser row)
+  # When set, each overrides the JSON's settings.image on its own rows so the
+  # svc_configs match the locally-built tag. Each is scoped by service_type so
+  # one build flag never clobbers the other family's image. Unset → the JSON
+  # default (already a clode-stack/* tag) wins.
+  KAIRO_JQ_FILTER='.configs[]
+    | (if ((.service_type | startswith("kairo")) and (env.BENJI_IMAGE | length > 0))
+         then .settings.image = env.BENJI_IMAGE else . end)
+    | (if ((.service_type == "aramb-browser") and (env.BROWSER_IMAGE | length > 0))
+         then .settings.image = env.BROWSER_IMAGE else . end)'
+  [[ -n "${BENJI_IMAGE:-}" ]] && \
+    say "pool-manager: overriding kairo* image with BENJI_IMAGE=${BENJI_IMAGE} (--agent-built)"
+  [[ -n "${BROWSER_IMAGE:-}" ]] && \
+    say "pool-manager: overriding aramb-browser image with BROWSER_IMAGE=${BROWSER_IMAGE} (--browser-built)"
   while IFS= read -r cfg; do
     st=$(jq -r '.service_type'              <<<"$cfg")
     settings_json=$(jq -c '.settings'        <<<"$cfg")
@@ -422,7 +429,7 @@ ON CONFLICT (service_type) DO UPDATE
       enabled = EXCLUDED.enabled,
       updated_at = now();
 SQL
-  done < <(BENJI_IMAGE="${BENJI_IMAGE:-}" jq -c "$KAIRO_JQ_FILTER" "$KAIRO_JSON")
+  done < <(BENJI_IMAGE="${BENJI_IMAGE:-}" BROWSER_IMAGE="${BROWSER_IMAGE:-}" jq -c "$KAIRO_JQ_FILTER" "$KAIRO_JSON")
   ok "pool-manager seeded"
 else
   skip "pool-manager not in scope — skipping svc_configs seed"
