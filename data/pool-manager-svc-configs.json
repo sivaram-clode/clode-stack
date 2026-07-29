@@ -1,11 +1,13 @@
 {
-  "_source": "metabase DB 12 (pool_manager) → clode.svc_configs WHERE service_type='kairo'",
+  "_source": "metabase DB 12 (pool_manager) → clode.svc_configs WHERE service_type IN ('kairo','aramb-browser')",
   "_extracted_at": "2026-06-06",
   "_notes": [
     "settings.publicNet, settings.volumeMounts and settings.workspaceSize are k8s-only — the local DockerDeployer ignores them, so the row is the production blob verbatim with the understanding that some keys are no-ops locally.",
-    "hot_count / cold_count / max_concurrent_deployments are written to svc_configs verbatim by seed.sh. Currently 2/2/2 — matches production. Lower to 1/1/1 if you want a leaner local pool.",
+    "hot_count / cold_count / max_concurrent_deployments are written to svc_configs verbatim by seed.sh. Currently 1/1/2 — a leaner local pool than production's 2/2/2.",
     "config_hash is left blank — pool-manager recomputes it on next reconcile.",
-    "configs is an array — seed.sh iterates and upserts each row. 'kairo-ephemeral' is the per-application ephemeral profile; same blob minus volumeMounts/workspaceSize (no PVC, see jumbo migration 000035)."
+    "configs is an array — seed.sh iterates and upserts each row. 'kairo-ephemeral' is the per-application ephemeral profile; same blob minus volumeMounts/workspaceSize (no PVC, see jumbo migration 000035).",
+    "settings.image is localized to a clode-stack/* tag so pool-manager's DockerDeployer uses the locally-built image (imagePullPolicy IfNotPresent — never a registry pull). kairo rows get 'clode-stack/benji:latest' (built by `up.sh --agent`); the aramb-browser row gets 'clode-stack/brave-head:latest' (built by `up.sh --browser`). seed.sh overrides these per service_type from BENJI_IMAGE / BROWSER_IMAGE when the corresponding build flag ran.",
+    "aramb-browser is the brave-head (agent-base-docker/brave-headed) pool ikki drives via IKKI_CONNECT; production image is bongcs/brave-headed:sha-*, imagePullPolicy Always."
   ],
   "configs": [
     {
@@ -61,7 +63,7 @@
       "hot_count": 1,
       "cold_count": 1,
       "max_concurrent_deployments": 2,
-      "enabled": true
+      "enabled": false
     },
     {
       "service_type": "kairo-ephemeral",
@@ -97,6 +99,35 @@
         {"key": "KAIRO_LISTEN_ADDR",  "value": ":18800"},
         {"key": "BROKER_ADDR",        "value": "louie:8600"},
         {"key": "AGENT_STATE_S3_ENABLED", "value": "true"}
+      ],
+      "hot_count": 1,
+      "cold_count": 1,
+      "max_concurrent_deployments": 2,
+      "enabled": true
+    },
+    {
+      "service_type": "aramb-browser",
+      "settings": {
+        "cpu": 0.5,
+        "image": "clode-stack/brave-head:latest",
+        "memory": 1,
+        "runAsRoot": true,
+        "healthChecks": [
+          {
+            "port": 9222,
+            "type": "TCP",
+            "periodSeconds": 10,
+            "timeoutSeconds": 10,
+            "failureThreshold": 6,
+            "initialDelaySeconds": 30
+          }
+        ],
+        "containerPort": 9222,
+        "restartPolicy": "Always",
+        "imagePullPolicy": "IfNotPresent"
+      },
+      "vars": [
+        {"key": "IKKI_CONNECT", "value": "true"}
       ],
       "hot_count": 1,
       "cold_count": 1,

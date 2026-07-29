@@ -91,10 +91,14 @@ agent_images() {
     if [[ -n "${BENJI_IMAGE:-}" ]]; then
       printf '%s\n' "$BENJI_IMAGE"
     fi
+    if [[ -n "${BROWSER_IMAGE:-}" ]]; then
+      printf '%s\n' "$BROWSER_IMAGE"
+    fi
     # Legacy + current local tags up.sh has produced — catches containers
     # launched under an older tag scheme that is no longer the seeded
     # default.
     printf 'clode-stack/benji:%s\n' latest dev vm voice slim
+    printf 'clode-stack/brave-head:%s\n' latest
   } | awk 'NF && !seen[$0]++'
 }
 

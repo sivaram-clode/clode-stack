@@ -17,6 +17,12 @@
 #   ./up.sh --agent --state              # + bake <benji>/archives/benji-state.tar.gz into the agent
 #                                        #   image and skip the boot-time OCI state pull entirely
 #   ./up.sh --agent --state=/path/to/state.tar.gz      # same, custom tarball
+#   ./up.sh --browser                    # + build the brave-head browser image
+#                                        #   (agent-base-docker/brave-headed Dockerfile) that
+#                                        #   pool-manager warms as the aramb-browser pool. Builds
+#                                        #   from the workspaces.yaml `agent-base-docker:` override
+#                                        #   if set, else ../agent-base-docker. Pair with
+#                                        #   `--profile browser` to bring up ikki (IKKI_CONNECT).
 #   ./up.sh --public                     # + cloudflared edge: flips outward URLs to https://*.srclode.online
 #   BUILD_BATCH_SIZE=4 ./up.sh           # env var still honored (--batch wins if both set)
 #
@@ -57,6 +63,7 @@ cd "$(dirname "$0")/.."
 BATCH_ARG=""
 PROFILES=()
 AGENT_BUILD=0    # 0 = don't build benji at all
+BROWSER_BUILD=0  # 0 = don't build the brave-head browser image at all
 STATE_TARBALL="" # unset = agent image keeps its default boot-time state pull
 STATE_DEFAULTED=0 # 1 = bare --state (no path); default tarball is resolved after
                   #     workspace resolution, against the same checkout benji builds from
@@ -104,6 +111,10 @@ while (( $# > 0 )); do
     --agent=*)
       AGENT_BUILD=1
       echo "warn: --agent no longer takes a mode (got '${1#--agent=}') — building the full benji image" >&2
+      shift
+      ;;
+    --browser)
+      BROWSER_BUILD=1
       shift
       ;;
     --state)
@@ -302,6 +313,33 @@ EOF
   export BENJI_IMAGE
   export AGENT_PROVIDER=aramb-vm
   echo "==> brahmi will provision via aramb-vm (AGENT_PROVIDER=aramb-vm, AGENT_VM_IMAGE=${BENJI_IMAGE})"
+fi
+
+# Build the brave-head browser image locally from the agent-base-docker
+# checkout (BROWSER_CTX = the workspaces.yaml `agent-base-docker:` override,
+# else ../agent-base-docker; the brave-headed subdir is the build context and
+# the Dockerfile's own dir). Only runs when --browser is passed; otherwise
+# skipped entirely — pool-manager keeps the aramb-browser row's JSON default
+# image with no local build. The clode-stack/ tag matches the JSON default
+# (imagePullPolicy IfNotPresent), so pool-manager's DockerDeployer uses this
+# build instead of a registry pull. The louie build stage is pulled from GHCR
+# (requires a docker login with a token that can read the clode-labs packages).
+if [[ "$BROWSER_BUILD" -eq 1 ]]; then
+  BROWSER_CTX="${AGENT_BASE_DOCKER_DIR:-../agent-base-docker}/brave-headed"
+  if [[ ! -f "${BROWSER_CTX}/Dockerfile" ]]; then
+    echo "error: brave-head Dockerfile not found at ${BROWSER_CTX}/Dockerfile" >&2
+    exit 2
+  fi
+  BROWSER_IMAGE="clode-stack/brave-head:latest"
+  echo "==> building brave-head browser image: ${BROWSER_IMAGE} from ${BROWSER_CTX}"
+  DOCKER_BUILDKIT=1 docker build \
+    -f "${BROWSER_CTX}/Dockerfile" \
+    -t "$BROWSER_IMAGE" "${BROWSER_CTX}"
+
+  # Read by seed.sh's pool-manager step so the aramb-browser svc_configs row
+  # uses the same tag that was just built.
+  export BROWSER_IMAGE
+  echo "==> pool-manager will warm aramb-browser from ${BROWSER_IMAGE}"
 fi
 
 echo "==> docker compose up -d ${TARGET_SERVICES[*]:-(all)}"

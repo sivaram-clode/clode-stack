@@ -14,3 +14,5 @@ raksha: .claude/worktrees/sa-endpoints
 # console-web: feat/console-tests-page   # frontend too — overrides the dev-server mount source
 # benji: feat/model-pricing-source       # the agent image — ONLY takes effect with `./stack.sh up --agent`
 #                                         # (benji isn't a compose service; it's the locally-built VM image)
+# agent-base-docker: feat/stealth-tweaks  # the brave-head browser image — ONLY takes effect with `./stack.sh up --browser`
+#                                         # (not a compose service; built from its brave-headed/ subdir)

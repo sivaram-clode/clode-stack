@@ -58,6 +58,14 @@ declare -gA _WS_DEFAULT_CTX=(
   [ec2mock]="../ec2-docker-mock"
 )
 
+# Services whose project marker is NOT a repo-root Dockerfile/package.json —
+# a checkout is "ok" only when this path (relative to the resolved context)
+# exists. agent-base-docker builds the brave-head image from its brave-headed
+# subdir, so the repo root has no Dockerfile of its own.
+declare -gA _WS_MARKER=(
+  [agent-base-docker]="brave-headed/Dockerfile"
+)
+
 # service name → env var name (pool-manager → POOL_MANAGER_DIR)
 _ws_var() { echo "$(echo "$1" | tr 'a-z-' 'A-Z_')_DIR"; }
 
@@ -148,9 +156,13 @@ resolve_workspaces() {
     fi
     WS_DIR[$svc]="$dir"
     WS_LABEL[$svc]=$(_ws_label "$svc" "$dir")
-    # A valid checkout has a project marker: a Dockerfile (built services) or
-    # a package.json (bind-mounted dev servers like console-web).
-    if [[ -d "$dir" && ( -f "$dir/Dockerfile" || -f "$dir/package.json" ) ]]; then
+    # A valid checkout has a project marker: a per-service override in
+    # _WS_MARKER (nested Dockerfile), else a Dockerfile (built services) or a
+    # package.json (bind-mounted dev servers like console-web) at the root.
+    local marker="${_WS_MARKER[$svc]:-}"
+    if [[ -n "$marker" ]]; then
+      [[ -d "$dir" && -f "$dir/$marker" ]] && WS_STATUS[$svc]="ok" || WS_STATUS[$svc]="MISSING"
+    elif [[ -d "$dir" && ( -f "$dir/Dockerfile" || -f "$dir/package.json" ) ]]; then
       WS_STATUS[$svc]="ok"
     else
       WS_STATUS[$svc]="MISSING"
