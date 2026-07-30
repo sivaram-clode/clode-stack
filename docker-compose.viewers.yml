@@ -1,0 +1,67 @@
+# Standalone DB viewers — a TESTBED, not part of the stack.
+#
+# It attaches to the already-running `clode` network (external) and connects to
+# the live datastores (db / redis / databend) by their in-network names, so it
+# touches NOTHING in docker-compose.yml and can't affect the running stack.
+#
+#   Run:      docker compose -f docker-compose.viewers.yml -p viewers up -d
+#   Stop:     docker compose -f docker-compose.viewers.yml -p viewers down
+#   (add -v to also drop the dbgate saved-query volume)
+#
+# Two lightweight web viewers to compare, both covering Postgres + Redis +
+# Databend(MySQL wire) in one UI:
+#   - dbgate  → http://localhost:8888  (connections PRE-CONFIGURED via env below,
+#                                        listed the moment it opens — no manual add)
+#   - whodb   → http://localhost:8889  (ultralight; enter the connection on the
+#                                        login screen — see the values in the
+#                                        dbgate env for host/port/user/pass)
+#
+# Datastore creds (local-dev): postgres/postgres · redis pass clode-redis-local
+# · databend/databend. Databend is reached over its MySQL wire (port 3307).
+
+services:
+  dbgate:
+    image: dbgate/dbgate:latest
+    ports:
+      - "8888:3000"
+    environment:
+      CONNECTIONS: pg,redis,databend
+      # Postgres — one connection lists every per-service DB (brahmi, raksha, …)
+      LABEL_pg: Postgres
+      SERVER_pg: db
+      PORT_pg: "5432"
+      USER_pg: postgres
+      PASSWORD_pg: postgres
+      ENGINE_pg: postgres@dbgate-plugin-postgres
+      # Redis — baseline uses logical DBs 0-3
+      LABEL_redis: Redis
+      SERVER_redis: redis
+      PORT_redis: "6379"
+      PASSWORD_redis: clode-redis-local
+      ENGINE_redis: redis@dbgate-plugin-redis
+      # Databend — over its MySQL wire (3307)
+      LABEL_databend: Databend
+      SERVER_databend: databend
+      PORT_databend: "3307"
+      USER_databend: databend
+      PASSWORD_databend: databend
+      ENGINE_databend: mysql@dbgate-plugin-mysql
+    volumes:
+      - dbgate_data:/root/.dbgate
+    networks: [clode]
+    restart: unless-stopped
+
+  whodb:
+    image: clidey/whodb:latest
+    ports:
+      - "8889:8080"
+    networks: [clode]
+    restart: unless-stopped
+
+volumes:
+  dbgate_data:
+
+networks:
+  clode:
+    external: true
+    name: clode
