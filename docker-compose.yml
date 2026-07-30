@@ -1307,6 +1307,11 @@ services:
       ENVIRONMENT: local
       HAS_DB: "true"
       DB_NAME: toolkit_proxy
+      # Point Composio at the local mock (the composio group in ec2mock) instead
+      # of the real backend.composio.dev in ../toolkit-proxy/.env. Inline here so
+      # it overrides env_file — connections + tools work end-to-end with no real
+      # Composio key or browser OAuth. github still routes through gitana.
+      COMPOSIO_BASE_URL: http://ec2mock:8080/composio
     labels:
       - traefik.enable=true
       - traefik.http.routers.toolkit-proxy.rule=Host(`toolkit-proxy.localhost`) || Host(`toolkit-proxy.srclode.online`)
@@ -1314,6 +1319,7 @@ services:
     depends_on:
       db: { condition: service_healthy }
       raksha: { condition: service_healthy }
+      ec2mock: { condition: service_healthy }
     networks: [clode]
     healthcheck:
       test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://127.0.0.1:8080/health || exit 1"]
@@ -1617,10 +1623,18 @@ services:
     # and rely on whatever's on the daemon.
     command: ["--addr", ":8080", "--network", "clode", "--pull-policy", "Never"]
     environment:
+      # DB_* for the /composio group (mock Composio): it self-provisions a
+      # `composio_mock` database on the shared Postgres and persists connections
+      # + tool data there, keyed by connect-ref. A connection completes only when
+      # its returned OAuth URL is opened + authorized (no auto-activation).
+      # COMPOSIO_MOCK_PUBLIC_URL defaults to the traefik ec2mock.localhost route.
+      <<: *db-common
       # The /narnia group pulls each deployment's config from jumbo and posts
       # status callbacks back to it. Lazy — only dialed when a deploy arrives,
-      # so no depends_on (avoids a jumbo↔ec2mock cycle).
+      # so no depends_on on jumbo (avoids a jumbo↔ec2mock cycle).
       JUMBO_BASE_URL: http://jumbo:8080
+    depends_on:
+      db: { condition: service_healthy }
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
     labels:
