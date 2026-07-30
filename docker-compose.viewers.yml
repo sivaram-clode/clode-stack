@@ -1,65 +1,25 @@
-# Standalone DB viewers — a TESTBED, not part of the stack.
+# Standalone DB viewer — WhoDB — a run-on-demand testbed, NOT part of the stack.
+# It attaches to the running `clode` network (external) and connects to the live
+# datastores (db / redis / databend) by their in-network names, so it touches
+# nothing in docker-compose.yml and can't affect the running stack.
 #
-# It attaches to the already-running `clode` network (external) and connects to
-# the live datastores (db / redis / databend) by their in-network names, so it
-# touches NOTHING in docker-compose.yml and can't affect the running stack.
+#   Run:   docker compose -f docker-compose.viewers.yml -p viewers up -d
+#   Open:  http://localhost:8889     (enter the connection on WhoDB's login)
+#   Stop:  docker compose -f docker-compose.viewers.yml -p viewers down
 #
-#   Run:      docker compose -f docker-compose.viewers.yml -p viewers up -d
-#   Stop:     docker compose -f docker-compose.viewers.yml -p viewers down
-#   (add -v to also drop the dbgate saved-query volume)
-#
-# Two lightweight web viewers to compare, both covering Postgres + Redis +
-# Databend(MySQL wire) in one UI:
-#   - dbgate  → http://localhost:8888  (connections PRE-CONFIGURED via env below,
-#                                        listed the moment it opens — no manual add)
-#   - whodb   → http://localhost:8889  (ultralight; enter the connection on the
-#                                        login screen — see the values in the
-#                                        dbgate env for host/port/user/pass)
-#
-# Datastore creds (local-dev): postgres/postgres · redis pass clode-redis-local
-# · databend/databend. Databend is reached over its MySQL wire (port 3307).
+# Connection values (local-dev). WhoDB's backend runs ON the clode network, so
+# use the IN-NETWORK host names (db / redis / databend), NOT localhost:
+#   Postgres  type Postgres  host db        port 5432  user postgres  pass postgres        db <svc> (e.g. brahmi)  schema public
+#   Redis     type Redis     host redis     port 6379  pass clode-redis-local              db 0
+#   Databend  type MySQL     host databend  port 3307  user databend  pass databend
 
 services:
-  dbgate:
-    image: dbgate/dbgate:latest
-    ports:
-      - "8888:3000"
-    environment:
-      CONNECTIONS: pg,redis,databend
-      # Postgres — one connection lists every per-service DB (brahmi, raksha, …)
-      LABEL_pg: Postgres
-      SERVER_pg: db
-      PORT_pg: "5432"
-      USER_pg: postgres
-      PASSWORD_pg: postgres
-      ENGINE_pg: postgres@dbgate-plugin-postgres
-      # Redis — baseline uses logical DBs 0-3
-      LABEL_redis: Redis
-      SERVER_redis: redis
-      PORT_redis: "6379"
-      PASSWORD_redis: clode-redis-local
-      ENGINE_redis: redis@dbgate-plugin-redis
-      # Databend — over its MySQL wire (3307)
-      LABEL_databend: Databend
-      SERVER_databend: databend
-      PORT_databend: "3307"
-      USER_databend: databend
-      PASSWORD_databend: databend
-      ENGINE_databend: mysql@dbgate-plugin-mysql
-    volumes:
-      - dbgate_data:/root/.dbgate
-    networks: [clode]
-    restart: unless-stopped
-
   whodb:
     image: clidey/whodb:latest
     ports:
       - "8889:8080"
     networks: [clode]
     restart: unless-stopped
-
-volumes:
-  dbgate_data:
 
 networks:
   clode:
