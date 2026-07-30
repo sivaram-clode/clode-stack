@@ -1,23 +1,32 @@
 # Standalone DB viewer — WhoDB — a run-on-demand testbed, NOT part of the stack.
-# It attaches to the running `clode` network (external) and connects to the live
+# Attaches to the running `clode` network (external) and connects to the live
 # datastores (db / redis / databend) by their in-network names, so it touches
 # nothing in docker-compose.yml and can't affect the running stack.
 #
 #   Run:   docker compose -f docker-compose.viewers.yml -p viewers up -d
-#   Open:  http://localhost:8889     (enter the connection on WhoDB's login)
+#   Open:  http://localhost:8889     (profiles below are PRE-LISTED on the login page)
 #   Stop:  docker compose -f docker-compose.viewers.yml -p viewers down
 #
-# Connection values (local-dev). WhoDB's backend runs ON the clode network, so
-# use the IN-NETWORK host names (db / redis / databend), NOT localhost:
-#   Postgres  type Postgres  host db        port 5432  user postgres  pass postgres        db <svc> (e.g. brahmi)  schema public
-#   Redis     type Redis     host redis     port 6379  pass clode-redis-local              db 0
-#   Databend  type MySQL     host databend  port 3307  user databend  pass databend
+# Connections are PRE-CONFIGURED via WhoDB's native env-profile support
+# (WHODB_<TYPE>_<N> = a JSON credential), so they show up ready on the login
+# page — no manual typing. Add more with _2, _3, … (e.g. another Postgres DB).
+# Datastores are reached by IN-NETWORK name (db / redis / databend). Local-dev
+# creds only. Databend is browsed over its MySQL wire (type MySQL, port 3307).
 
 services:
   whodb:
     image: clidey/whodb:latest
     ports:
       - "8889:8080"
+    environment:
+      # Postgres — one profile per service DB (add _4, _5 … for more)
+      WHODB_POSTGRES_1: '{"alias":"pg-brahmi","host":"db","user":"postgres","password":"postgres","database":"brahmi","port":"5432"}'
+      WHODB_POSTGRES_2: '{"alias":"pg-raksha","host":"db","user":"postgres","password":"postgres","database":"raksha","port":"5432"}'
+      WHODB_POSTGRES_3: '{"alias":"pg-jumbo","host":"db","user":"postgres","password":"postgres","database":"jumbo","port":"5432"}'
+      # Redis — baseline logical DB 0 (raksha + brahmi)
+      WHODB_REDIS_1: '{"alias":"redis","host":"redis","password":"clode-redis-local","database":"0","port":"6379"}'
+      # Databend — MySQL wire; browse as type MySQL
+      WHODB_MYSQL_1: '{"alias":"databend","host":"databend","user":"databend","password":"databend","database":"mang_proxy","port":"3307"}'
     networks: [clode]
     restart: unless-stopped
 
