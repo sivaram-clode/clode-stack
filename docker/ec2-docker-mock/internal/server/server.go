@@ -20,6 +20,7 @@ import (
 
 	"github.com/sivaram-clode/ec2-docker-mock/internal/mock/aws"
 	"github.com/sivaram-clode/ec2-docker-mock/internal/mock/baghira"
+	"github.com/sivaram-clode/ec2-docker-mock/internal/mock/composio"
 	"github.com/sivaram-clode/ec2-docker-mock/internal/mock/narnia"
 )
 
@@ -46,6 +47,12 @@ func New(awsMock *aws.Mock, nh *narnia.Handler, bh *baghira.Handler) *fiber.App 
 	// narnia + baghira groups — native Fiber, one prefix each.
 	nh.Register(app.Group("/narnia", scoped("narnia")))
 	bh.Register(app.Group("/baghira", scoped("baghira")))
+
+	// composio group — a Postgres-backed mock of the Composio API for the local
+	// stack's toolkit-proxy. Self-constructing (no shared deps): it bootstraps
+	// its own database on New(); a DB failure degrades to 503 on data routes
+	// rather than taking down the unified mock.
+	composio.New().Register(app.Group("/composio", scoped("composio")))
 
 	return app
 }
