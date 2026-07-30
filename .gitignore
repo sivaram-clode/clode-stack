@@ -9,4 +9,6 @@ keys/
 # Rolling per-service container logs — runtime output, not source.
 logs/
 
+# BuildKit cache-mount overlay — regenerated on every `stack up` by
+# scripts/gen-build-cache.sh. Generated artifact, not source.
 docker-compose.cache.yml
