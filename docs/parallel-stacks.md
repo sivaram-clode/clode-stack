@@ -79,6 +79,29 @@ closure size reflects real coupling.
 branch if it's in the workspaces file, else run the baseline image** (the
 build/mirror split), with the needed profiles enabled automatically.
 
+### Pre-flight connectivity (fail fast, no broken flows)
+
+Every `fork` validates that its **run-set is dependency-closed** before starting
+anything. If you forked a subset where an in-between node is dropped (e.g. run
+`brahmi` + `mang-proxy` but not the services they call), the flow would break
+mid-chain — so the fork **aborts before touching Docker** and names the missing
+nodes:
+
+```
+$ stack fork b1 --port 8180 brahmi mang-proxy
+DISCONNECTED: in-between node(s) missing from the set —
+  jumbo   <- called by brahmi, mang-proxy
+  raksha  <- called by brahmi, mang-proxy
+  ...
+add them to the set, or pass --resolve to auto-include the closure.
+```
+
+`--resolve` closes the set by construction (so it always passes); a full clone
+(no subset) is already complete. Run the check standalone with `stack check
+<svc...>`, and see the branch-vs-connecting split for a workspace file with
+`stack resolve --workspace <file>` — that's how the agent learns which
+in-between nodes will run on MAIN and whether any of them also needs branching.
+
 ### Addressing (derivable)
 
 Same hostnames as baseline, on the clone's port. The **port tells you the

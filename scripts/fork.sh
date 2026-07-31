@@ -170,6 +170,19 @@ cmd_up() {
     info "resolved seed closure → ${#services[@]} services: ${services[*]}"
   fi
 
+  # Pre-flight: the run-set must be dependency-closed. Otherwise an in-between
+  # node is dropped and the test flow silently breaks mid-chain. --resolve closes
+  # it by construction; an explicit subset is validated here and FAILS FAST with
+  # the missing node named. A full clone (no subset) is already complete.
+  if (( ${#services[@]} > 0 )); then
+    local chk
+    if ! chk="$(CLODE_STACK_DIR="$STACK_DIR" "$SCRIPTS_DIR/lib/depgraph.py" check "${services[@]}" 2>&1)"; then
+      echo "$chk" >&2
+      die "pre-flight failed — the service set is not dependency-closed (add the missing node(s) above, or pass --resolve to auto-include them)"
+    fi
+    info "pre-flight OK: run-set is dependency-closed"
+  fi
+
   # Changed = a listed service whose resolved context differs from ../<svc>.
   # Each gets image clode-stack/<svc>:<branch> and is rebuilt; the rest reuse
   # the baseline image.

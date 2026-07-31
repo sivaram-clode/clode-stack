@@ -22,8 +22,12 @@ inspectable/editable. Regenerate it after code changes with `build` or `--refres
 
 Usage:
   depgraph.py graph   [--json] [--refresh]   print the relation map
-  depgraph.py resolve SVC [SVC...] [--json] [--refresh]
-                                             print the wake-closure for the seeds
+  depgraph.py resolve SVC... | --workspace FILE  [--json] [--refresh]
+                                             wake-closure for seeds (or a workspace
+                                             file's services); marks which nodes are
+                                             branch vs connecting (in-between) nodes
+  depgraph.py check   SVC... [--json]        pre-flight: is this set dependency-closed?
+                                             exit 1 + list dropped in-between nodes if not
   depgraph.py build                          (re)generate service-graph.json from source
 
 CLODE_STACK_DIR selects the stack checkout (default: current directory).
@@ -185,31 +189,86 @@ def cmd_graph(args):
     print("  regenerate after code changes: stack graph --refresh")
 
 
+def _seeds_from_workspace(path):
+    """Service names listed in a workspaces.yaml-format file (flat `svc: selector`)."""
+    seeds = []
+    with open(path) as f:
+        for raw in f:
+            line = raw.split("#", 1)[0].strip()
+            if line and ":" in line and not line.startswith("_"):
+                seeds.append(line.split(":", 1)[0].strip())
+    return seeds
+
+
 def cmd_resolve(args):
-    seeds = [a for a in args if not a.startswith("-")]
+    a = list(args)
+    ws = None
+    for flag in ("--workspace", "--workspaces"):
+        if flag in a:
+            i = a.index(flag)
+            ws = a[i + 1]
+            del a[i:i + 2]
+    seeds = [x for x in a if not x.startswith("-")]
+    branch = set()
+    if ws:
+        wsseeds = _seeds_from_workspace(ws)
+        seeds += wsseeds
+        branch |= set(wsseeds)
     if not seeds:
-        sys.exit("resolve: need at least one service")
-    inv, edges = load_graph("--refresh" in args)
+        sys.exit("resolve: need a service or --workspace FILE")
+    inv, edges = load_graph("--refresh" in a)
     unknown = [s for s in seeds if s not in inv]
     if unknown:
         sys.stderr.write(f"warn: unknown service(s): {', '.join(unknown)}\n")
     closure = resolve(seeds, edges)
     gates = sorted({inv[n]["gate"] for n in closure
                     if n in inv and inv[n]["gate"] != "core"})
-    if "--json" in args:
+    connecting = sorted(n for n in closure if n not in (branch or set(seeds)))
+    if "--json" in a:
         print(json.dumps({"seeds": seeds, "wake": sorted(closure),
-                          "profiles": gates}, indent=2))
+                          "connecting": connecting, "profiles": gates}, indent=2))
         return
     print(f"# resolve {seeds} -> {len(closure)} services to wake\n")
     for n in sorted(closure):
-        tag = "seed" if n in seeds else "dep"
+        if ws:
+            tag = "branch" if n in branch else "connecting"
+        else:
+            tag = "seed" if n in seeds else "dep"
         gate = inv[n]["gate"] if n in inv else "?"
         print(f"  {n:16} [{gate:9}] ({tag})")
+    if ws and connecting:
+        print(f"\n  in-between nodes (run on MAIN unless branched): {', '.join(connecting)}")
     if gates:
-        print(f"\n  profiles to enable: {','.join(gates)}")
+        print(f"  profiles to enable: {','.join(gates)}")
 
 
-CMDS = {"graph": cmd_graph, "resolve": cmd_resolve, "build": cmd_build}
+def cmd_check(args):
+    svcs = [a for a in args if not a.startswith("-")]
+    if not svcs:
+        sys.exit("check: need the service set to validate")
+    inv, edges = load_graph("--refresh" in args)
+    adj = _adj(edges)
+    have = set(svcs)
+    missing = {}   # dropped callee -> [callers in the set that need it]
+    for a in svcs:
+        for b in adj.get(a, []):
+            if b not in have:
+                missing.setdefault(b, []).append(a)
+    if "--json" in args:
+        print(json.dumps({"closed": not missing,
+                          "missing": {k: sorted(v) for k, v in missing.items()}}, indent=2))
+        sys.exit(0 if not missing else 1)
+    if not missing:
+        print(f"OK: {len(have)} services form a dependency-closed set")
+        return
+    sys.stderr.write("DISCONNECTED: in-between node(s) missing from the set —\n")
+    for b in sorted(missing):
+        sys.stderr.write(f"  {b}  <- called by {', '.join(sorted(missing[b]))}\n")
+    sys.stderr.write("\nadd them to the set, or pass --resolve to auto-include the closure.\n")
+    sys.exit(1)
+
+
+CMDS = {"graph": cmd_graph, "resolve": cmd_resolve, "check": cmd_check, "build": cmd_build}
 if len(sys.argv) < 2 or sys.argv[1] not in CMDS:
     sys.exit(__doc__)
 CMDS[sys.argv[1]](sys.argv[2:])
