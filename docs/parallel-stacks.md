@@ -179,6 +179,35 @@ static build (no Vite) is unaffected. HMR's WS upgrade is proxied by traefik.
 
 ---
 
+## Phase 2 — within-network fork (`wfork`, first increment shipped)
+
+Instead of cloning the whole compose, run a single forked service **on the
+existing `clode` network** alongside baseline:
+
+```
+stack wfork <svc> --name <n> [--image <img>]   # run <svc>-<n> (default image: baseline)
+stack wfork-down <svc>-<n>
+stack wfork-ls
+```
+
+`<svc>-<n>` joins the `clode` network, is routed by the baseline traefik at
+`http://<svc>-<n>.localhost:8080`, and inherits the baseline service's env, port,
+command and resource caps (lifted from `docker compose config`). Every unchanged
+peer it calls resolves by normal DNS to the **baseline** instance — it **falls
+through to baseline** for everything you didn't fork. So one forked service costs
+**one container**, no mirrors.
+
+Verified: `wfork raksha --name t1` → `raksha-t1.localhost:8080` serves (401, same
+as baseline), on the `clode` net, capped at 512 MiB/1 cpu, talking to baseline
+db/redis; baseline `raksha.localhost` untouched.
+
+**Scope today:** a *single* forked service against an otherwise-baseline stack
+(fall-through). Two things still to come: **(a)** build from a feature-branch
+worktree (reuse the `up` build flow to tag `clode-stack/<svc>:<branch>`, then run
+that image); **(b)** the **origin router** below, needed when forked services must
+call *each other* (a chain) rather than fall through to baseline; and per-branch
+logical DB so a schema-changing fork doesn't share baseline's DB.
+
 ## Phase 2 — the origin-aware router (designed, not built)
 
 The lean end of the dial: one shared baseline; a clone runs **only the changed
