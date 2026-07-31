@@ -1,42 +1,60 @@
 #!/usr/bin/env python3
 """Service relation map + dependency resolver for clode-stack.
 
-Builds a DIRECTED graph of services from docker-compose. An edge A -> B means
-"A needs B" — B must be up for A to run. The edge source is `depends_on`, the
-stack's accurate "must be healthy/complete before I start" signal.
+Edges are the ACTUAL service call graph, derived from each service's own Go
+source — NOT from compose `depends_on` (which is only boot order: brahmi does
+not depends_on jumbo/toolkit-proxy yet calls them). For every service repo we
+grep its .go files for the peer URL env-var names it reads (JUMBO_URL,
+TOOLKIT_PROXY_BASE_URL, POOL_MANAGER_URL, RAKSHA_BASE_URL, …) and map each name
+to the service it points at. An edge A -> B means "A's code reads B's URL" —
+i.e. A calls B.
 
-Why not scan env URLs? The shared `*service-urls` anchor injects every service
-URL into ~22 services, so scanning environment would yield a near-complete mesh
-(every service "refers to" every other) — useless for minimal resolution. So
-depends_on is the signal; runtime-only HTTP calls that aren't health-gated
-(e.g. brahmi -> jumbo) are intentionally not edges here — add such a service as
-an explicit seed if a clone needs it.
+Compose is used ONLY for the node inventory + metadata (service name, its repo
+dir via build.context, and its profile gate) — never for the edges.
 
-Profile gates are NOT pruned: every service is a node, tagged with its gate
-(the profile name, or "core" when always-on). Resolving a seed set returns the
-transitive closure (services to wake) plus the profile gates that closure needs
-enabled.
+Profile gates are NOT pruned: every service is a node tagged with its gate
+(`core` = always-on). Resolving a seed set returns the transitive wake-closure
+plus the profile gates that closure needs enabled.
+
+The grepped graph is frozen into a committed static map (service-graph.json, a
+standard adjacency representation) so `graph`/`resolve` are fast and the map is
+inspectable/editable. Regenerate it after code changes with `build` or `--refresh`.
 
 Usage:
-  depgraph.py graph   [--json]         print the relation map
-  depgraph.py resolve SVC [SVC...] [--json]
-                                       print the wake-closure for the seeds
+  depgraph.py graph   [--json] [--refresh]   print the relation map
+  depgraph.py resolve SVC [SVC...] [--json] [--refresh]
+                                             print the wake-closure for the seeds
+  depgraph.py build                          (re)generate service-graph.json from source
 
 CLODE_STACK_DIR selects the stack checkout (default: current directory).
 """
-import sys, json, subprocess, os
+import sys, json, subprocess, os, re
+
+STACK_DIR = os.environ.get("CLODE_STACK_DIR", ".")
+
+# Env-var name → service resolution. Strip role/transport tokens, join the rest,
+# and match (separator-insensitive) against a service name. So MANG_PROXY_URL ->
+# "mangproxy" -> mang-proxy; CHA_CHING_URL & CHACHING_URL -> "chaching" ->
+# cha-ching; TOOLKIT_PROXY_BASE_URL -> toolkit-proxy; AUTH_ISSUER -> (alias) raksha.
+_DROP = {"URL", "BASE", "INTERNAL", "EXTERNAL", "MCP", "API", "ADDR", "BROKER",
+         "ENDPOINT", "ISSUER", "CONNECT", "SERVICE", "SVC", "HOST", "PORT",
+         "GRPC", "WS", "HTTP", "V1", "V2"}
+_ALIAS = {"auth": "raksha", "jwt": "raksha", "database": "db", "postgres": "db"}
+# quoted env-var literal in Go source (os.Getenv("X"), `env:"X"` tags, etc.)
+_GREP_PAT = r'"[A-Z][A-Z0-9_]*(URL|ADDR|ENDPOINT|ISSUER|BROKER)[A-Z0-9_]*"'
+_NAME_RE = re.compile(r'"([A-Z][A-Z0-9_]*(?:URL|ADDR|ENDPOINT|ISSUER|BROKER)[A-Z0-9_]*)"')
 
 
-def _compose_base():
-    d = os.environ.get("CLODE_STACK_DIR", ".")
-    return ["docker", "compose", "--project-directory", d,
+def _norm(s):
+    return re.sub(r'[^a-z0-9]', '', s.lower())
+
+
+def load_inventory():
+    """Nodes + metadata from compose (all gates enabled). Edges come from source."""
+    d = STACK_DIR
+    base = ["docker", "compose", "--project-directory", d,
             "-f", os.path.join(d, "docker-compose.yml"),
             "-f", os.path.join(d, "docker-compose.cache.yml")]
-
-
-def load_config():
-    """Resolved compose with ALL profile gates enabled, so every node is present."""
-    base = _compose_base()
     profiles = subprocess.run(base + ["config", "--profiles"],
                               capture_output=True, text=True).stdout.split()
     env = dict(os.environ, COMPOSE_PROFILES=",".join(profiles))
@@ -45,26 +63,56 @@ def load_config():
     if out.returncode != 0:
         sys.stderr.write(out.stderr)
         sys.exit(1)
-    return json.loads(out.stdout)
-
-
-def build_graph(cfg):
-    """-> (nodes: {svc: {gate, buildable}}, edges: set[(a,b)]  meaning a needs b)."""
-    svcs = cfg["services"]
-    nodes, edges = {}, set()
-    for name, c in svcs.items():
+    inv = {}
+    for name, c in json.loads(out.stdout)["services"].items():
+        b = c.get("build")
+        ctx = b.get("context") if isinstance(b, dict) else (b if isinstance(b, str) else None)
         prof = c.get("profiles") or []
-        nodes[name] = {"gate": prof[0] if prof else "core",
-                       "buildable": bool(c.get("build"))}
-        dep = c.get("depends_on") or {}
-        deps = dep.keys() if isinstance(dep, dict) else dep
-        for b in deps:
-            edges.add((name, b))
-    return nodes, edges
+        inv[name] = {
+            "gate": prof[0] if prof else "core",
+            "buildable": bool(b),
+            "dir": os.path.realpath(os.path.join(d, ctx)) if ctx else None,
+        }
+    return inv
+
+
+def _env_names_in(path):
+    """Peer URL env-var names referenced in a repo's .go source."""
+    if not path or not os.path.isdir(path):
+        return set()
+    r = subprocess.run(
+        ["grep", "-rhoE", "--include=*.go",
+         "--exclude-dir=vendor", "--exclude-dir=.worktrees",
+         "--exclude-dir=.claude", "--exclude-dir=node_modules",
+         _GREP_PAT, path],
+        capture_output=True, text=True)
+    names = set()
+    for line in r.stdout.splitlines():
+        m = _NAME_RE.search(line)
+        if m:
+            names.add(m.group(1))
+    return names
+
+
+def _target(envname, index):
+    core = "".join(p for p in envname.split("_") if p not in _DROP).lower()
+    return _ALIAS.get(core) or index.get(core)
+
+
+def build_edges(inv):
+    """A -> B when A's source reads an env var naming B. Returns (edges, why)."""
+    index = {_norm(s): s for s in inv}
+    edges, why = set(), {}
+    for svc, meta in inv.items():
+        for name in _env_names_in(meta["dir"]):
+            t = _target(name, index)
+            if t and t != svc and t in inv:
+                edges.add((svc, t))
+                why.setdefault((svc, t), name)
+    return edges, why
 
 
 def resolve(seeds, edges):
-    """Transitive closure over outgoing edges (seed + everything it needs)."""
     adj = {}
     for a, b in edges:
         adj.setdefault(a, set()).add(b)
@@ -85,32 +133,69 @@ def _adj(edges):
     return a
 
 
+STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "service-graph.json")
+
+
+def write_static(inv, edges):
+    adj = _adj(edges)
+    data = {s: {"gate": inv[s]["gate"], "buildable": inv[s]["buildable"],
+                "calls": adj.get(s, [])} for s in sorted(inv)}
+    with open(STATIC, "w") as f:
+        json.dump(data, f, indent=2)
+        f.write("\n")
+    return data
+
+
+def load_graph(refresh=False):
+    """(inv, edges). Uses the committed static map unless --refresh or it's absent."""
+    if refresh or not os.path.exists(STATIC):
+        inv = load_inventory()
+        edges, _ = build_edges(inv)
+        write_static(inv, edges)
+        return inv, edges
+    data = json.load(open(STATIC))
+    inv = {s: {"gate": m["gate"], "buildable": m["buildable"]} for s, m in data.items()}
+    edges = {(s, t) for s, m in data.items() for t in m.get("calls", [])}
+    return inv, edges
+
+
+def cmd_build(args):
+    inv = load_inventory()
+    edges, _ = build_edges(inv)
+    write_static(inv, edges)
+    print(f"wrote {STATIC}\n  {len(inv)} nodes, {len(edges)} edges (from config.go grep)")
+
+
 def cmd_graph(args):
-    nodes, edges = build_graph(load_config())
+    inv, edges = load_graph("--refresh" in args)
     adj = _adj(edges)
     if "--json" in args:
-        print(json.dumps({"nodes": nodes, "edges": adj}, indent=2))
+        print(json.dumps({s: {"gate": inv[s]["gate"], "buildable": inv[s]["buildable"],
+                              "calls": adj.get(s, [])} for s in sorted(inv)}, indent=2))
         return
-    print(f"# service relation map — {len(nodes)} nodes, {len(edges)} edges "
-          "(A -> B = A needs B)\n")
-    for n in sorted(nodes):
-        mark = "*" if nodes[n]["buildable"] else " "
+    src = "live grep (rewrote static map)" if "--refresh" in args \
+        else ("static map" if os.path.exists(STATIC) else "live grep")
+    print(f"# service relation map — {len(inv)} nodes, {len(edges)} edges "
+          f"(A -> B = A calls B; source: {src})\n")
+    for n in sorted(inv):
+        mark = "*" if inv[n]["buildable"] else " "
         deps = ", ".join(adj.get(n, [])) or "-"
-        print(f"  {mark} {n:16} [{nodes[n]['gate']:9}] -> {deps}")
+        print(f"  {mark} {n:16} [{inv[n]['gate']:9}] -> {deps}")
     print("\n  (* = buildable; [gate] = profile, 'core' = always on)")
+    print("  regenerate after code changes: stack graph --refresh")
 
 
 def cmd_resolve(args):
     seeds = [a for a in args if not a.startswith("-")]
     if not seeds:
         sys.exit("resolve: need at least one service")
-    nodes, edges = build_graph(load_config())
-    unknown = [s for s in seeds if s not in nodes]
+    inv, edges = load_graph("--refresh" in args)
+    unknown = [s for s in seeds if s not in inv]
     if unknown:
         sys.stderr.write(f"warn: unknown service(s): {', '.join(unknown)}\n")
     closure = resolve(seeds, edges)
-    gates = sorted({nodes[n]["gate"] for n in closure
-                    if n in nodes and nodes[n]["gate"] != "core"})
+    gates = sorted({inv[n]["gate"] for n in closure
+                    if n in inv and inv[n]["gate"] != "core"})
     if "--json" in args:
         print(json.dumps({"seeds": seeds, "wake": sorted(closure),
                           "profiles": gates}, indent=2))
@@ -118,13 +203,13 @@ def cmd_resolve(args):
     print(f"# resolve {seeds} -> {len(closure)} services to wake\n")
     for n in sorted(closure):
         tag = "seed" if n in seeds else "dep"
-        gate = nodes[n]["gate"] if n in nodes else "?"
+        gate = inv[n]["gate"] if n in inv else "?"
         print(f"  {n:16} [{gate:9}] ({tag})")
     if gates:
         print(f"\n  profiles to enable: {','.join(gates)}")
 
 
-CMDS = {"graph": cmd_graph, "resolve": cmd_resolve}
+CMDS = {"graph": cmd_graph, "resolve": cmd_resolve, "build": cmd_build}
 if len(sys.argv) < 2 or sys.argv[1] not in CMDS:
     sys.exit(__doc__)
 CMDS[sys.argv[1]](sys.argv[2:])

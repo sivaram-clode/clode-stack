@@ -1,0 +1,238 @@
+{
+  "aramb-gateway": {
+    "gate": "core",
+    "buildable": true,
+    "calls": [
+      "brahmi",
+      "cha-ching",
+      "raksha"
+    ]
+  },
+  "brahmi": {
+    "gate": "core",
+    "buildable": true,
+    "calls": [
+      "cha-ching",
+      "chil",
+      "gitana",
+      "ikki",
+      "intervix",
+      "jumbo",
+      "louie",
+      "mang-proxy",
+      "pool-manager",
+      "raksha",
+      "redis",
+      "skills-registry",
+      "toolkit-proxy"
+    ]
+  },
+  "cha-ching": {
+    "gate": "core",
+    "buildable": true,
+    "calls": [
+      "brahmi",
+      "ikki",
+      "jumbo",
+      "mang-proxy",
+      "raksha"
+    ]
+  },
+  "chil": {
+    "gate": "org",
+    "buildable": true,
+    "calls": [
+      "brahmi",
+      "jumbo",
+      "raksha",
+      "skills-registry"
+    ]
+  },
+  "cloudflared": {
+    "gate": "public",
+    "buildable": false,
+    "calls": []
+  },
+  "console-web": {
+    "gate": "core",
+    "buildable": false,
+    "calls": []
+  },
+  "databend": {
+    "gate": "core",
+    "buildable": false,
+    "calls": []
+  },
+  "db": {
+    "gate": "core",
+    "buildable": false,
+    "calls": []
+  },
+  "ec2mock": {
+    "gate": "core",
+    "buildable": true,
+    "calls": [
+      "brahmi",
+      "jumbo"
+    ]
+  },
+  "gitana": {
+    "gate": "git",
+    "buildable": true,
+    "calls": []
+  },
+  "ikki": {
+    "gate": "browser",
+    "buildable": true,
+    "calls": [
+      "brahmi",
+      "cha-ching",
+      "jumbo",
+      "louie",
+      "raksha",
+      "redis"
+    ]
+  },
+  "intervix": {
+    "gate": "interview",
+    "buildable": true,
+    "calls": [
+      "brahmi",
+      "db",
+      "jumbo",
+      "raksha",
+      "redis",
+      "vova"
+    ]
+  },
+  "jumbo": {
+    "gate": "core",
+    "buildable": true,
+    "calls": [
+      "db",
+      "gitana",
+      "narnia",
+      "redis"
+    ]
+  },
+  "k3s": {
+    "gate": "deploy",
+    "buildable": true,
+    "calls": []
+  },
+  "louie": {
+    "gate": "browser",
+    "buildable": true,
+    "calls": [
+      "ikki",
+      "jumbo",
+      "raksha",
+      "redis"
+    ]
+  },
+  "mang-proxy": {
+    "gate": "core",
+    "buildable": true,
+    "calls": [
+      "cha-ching",
+      "jumbo",
+      "raksha",
+      "redis"
+    ]
+  },
+  "mcp-server": {
+    "gate": "mcp",
+    "buildable": true,
+    "calls": []
+  },
+  "minio": {
+    "gate": "core",
+    "buildable": false,
+    "calls": []
+  },
+  "minio-setup": {
+    "gate": "core",
+    "buildable": false,
+    "calls": []
+  },
+  "narnia": {
+    "gate": "deploy",
+    "buildable": true,
+    "calls": [
+      "jumbo"
+    ]
+  },
+  "narnia-workers": {
+    "gate": "deploy",
+    "buildable": true,
+    "calls": [
+      "gitana",
+      "jumbo",
+      "narnia",
+      "raksha"
+    ]
+  },
+  "notify": {
+    "gate": "email",
+    "buildable": true,
+    "calls": []
+  },
+  "oauth-mock": {
+    "gate": "core",
+    "buildable": true,
+    "calls": []
+  },
+  "pool-manager": {
+    "gate": "pool",
+    "buildable": true,
+    "calls": [
+      "brahmi",
+      "ikki",
+      "jumbo",
+      "raksha"
+    ]
+  },
+  "raksha": {
+    "gate": "core",
+    "buildable": true,
+    "calls": [
+      "cha-ching",
+      "jumbo",
+      "notify",
+      "redis"
+    ]
+  },
+  "redis": {
+    "gate": "core",
+    "buildable": false,
+    "calls": []
+  },
+  "skills-registry": {
+    "gate": "skills",
+    "buildable": true,
+    "calls": [
+      "gitana"
+    ]
+  },
+  "toolkit-proxy": {
+    "gate": "tools",
+    "buildable": true,
+    "calls": [
+      "gitana",
+      "jumbo"
+    ]
+  },
+  "traefik": {
+    "gate": "core",
+    "buildable": false,
+    "calls": []
+  },
+  "vova": {
+    "gate": "voice",
+    "buildable": true,
+    "calls": [
+      "brahmi",
+      "redis"
+    ]
+  }
+}

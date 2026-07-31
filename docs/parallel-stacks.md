@@ -45,26 +45,35 @@ stack fork-ls
 ### Service relation map + dependency resolver
 
 `scripts/lib/depgraph.py` (exposed as `stack graph` / `stack resolve`) builds a
-**directed** service graph from the compose — an edge `A -> B` means *A needs B*.
-The edge source is **`depends_on`**, the stack's accurate "must be healthy/complete
-before I start" signal.
+**directed** service graph where `A -> B` means **A calls B**. Edges are the
+**actual call graph**, derived by grepping each service repo's `.go` source for
+the peer URL env-var names it reads (`JUMBO_URL`, `TOOLKIT_PROXY_BASE_URL`,
+`POOL_MANAGER_URL`, …) and mapping each name to the service it points at.
 
-> Why not scan env URLs? The shared `*service-urls` anchor injects every service
-> URL into ~22 services, so env-scanning would make it a near-complete mesh —
-> useless for minimal resolution. Runtime-only HTTP calls that aren't
-> health-gated (e.g. `brahmi -> jumbo`) are therefore not edges; add such a
-> service as an explicit seed if a clone needs it.
+> **Not `depends_on`** — that's only boot order (brahmi doesn't `depends_on`
+> jumbo/toolkit-proxy yet calls them). **Not the compose env** — the shared
+> `*service-urls` anchor injects every URL into ~22 services, which would make a
+> near-complete mesh. The code grep is what each service *actually* references.
+
+The grepped graph is frozen into a committed **static map**,
+`scripts/lib/service-graph.json` (a standard adjacency representation: per
+service its `gate`, `buildable`, and `calls`), so `graph`/`resolve` are fast and
+the map is inspectable/editable. Regenerate after code changes with `stack graph
+--refresh` (or `depgraph.py build`).
 
 Profile gates are **not** pruned — every service is a node tagged with its gate
 (`core` = always-on). `resolve` returns the transitive closure to wake **and the
-profile gates that closure touches** (it walks *across* gates, e.g.
-`intervix` → `vova` surfaces both `interview` and `voice`).
+profile gates that closure needs** — it walks *across* gates.
 
 ```
-stack graph                     # full relation map (nodes, edges, gates)
-stack resolve brahmi            # brahmi + db, ec2mock, minio, minio-setup, raksha, redis
-stack resolve mang-proxy toolkit-proxy   # closure + "profiles to enable: tools"
+stack graph                     # relation map (from the static map; --refresh to rebuild)
+stack resolve toolkit-proxy     # leaf: toolkit-proxy + db, gitana, jumbo, narnia, redis
+stack resolve brahmi            # orchestrator: fans out to ~most of the stack (that's real)
 ```
+
+Because edges are the true call graph, a central service (brahmi) legitimately
+resolves to most of the stack, while a leaf (toolkit-proxy) stays small — the
+closure size reflects real coupling.
 
 `fork --resolve` chains this in: seeds → closure → per node, **rebuild from
 branch if it's in the workspaces file, else run the baseline image** (the
