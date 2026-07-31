@@ -42,13 +42,12 @@ info() { echo "==> $*"; }
 # (../<svc>, ../<svc>/.env) resolve, regardless of where this script lives.
 _compose() {
   local name=$1 overlay=$2; shift 2
-  docker compose \
-    --project-directory "$STACK_DIR" \
-    -p "$name" \
-    -f "$STACK_DIR/docker-compose.yml" \
-    -f "$STACK_DIR/docker-compose.cache.yml" \
-    -f "$overlay" \
-    "$@"
+  local files=(-f "$STACK_DIR/docker-compose.yml" -f "$STACK_DIR/docker-compose.cache.yml")
+  # Resource ceilings — inherited by every clone so a runaway fork can't starve
+  # the host (NO_LIMITS=1 to skip).
+  [[ -z "${NO_LIMITS:-}" && -f "$STACK_DIR/docker-compose.limits.yml" ]] \
+    && files+=(-f "$STACK_DIR/docker-compose.limits.yml")
+  docker compose --project-directory "$STACK_DIR" -p "$name" "${files[@]}" -f "$overlay" "$@"
 }
 
 # ── generate the per-clone overlay ──────────────────────────────────────────

@@ -226,9 +226,17 @@ baseline services."
 
 ---
 
-## Safety prerequisite (both phases)
+## Resource ceilings (implemented)
 
-Apply the pending `daemon.json` fix (log rotation `max-size:20m/max-file:5` +
-`builder.gc.defaultKeepStorage` 20→8 GB, one docker restart) before running
-looping clone containers, so a runaway clone can't refill the disk. A per-service
-resource-limit overlay complements it.
+`docker-compose.limits.yml` sets a per-service `mem_limit` + `cpus` **ceiling**
+(caps to stop a runaway container — like the usageq hot-loop that once filled the
+disk — not tight packing). `scripts/up.sh` applies it on every bring-up and every
+`stack fork` clone inherits it; `NO_LIMITS=1` skips it. Tiers: Go svc 512m/1cpu,
+brahmi & skills-registry 768m/1.5, console-web 1.5g/2, db 1g/2, databend 2g/2,
+minio 1g/1.5, redis 512m/1, k3s 2g/2, traefik/mocks small.
+
+## Safety prerequisite
+
+Also apply the pending `daemon.json` fix (log rotation `max-size:20m/max-file:5` +
+`builder.gc.defaultKeepStorage` 20→8 GB, one docker restart) — the limits cap RAM,
+this caps log/build-cache disk.

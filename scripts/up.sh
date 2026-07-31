@@ -243,6 +243,12 @@ if (( BATCH_SIZE > 6 )); then
   exit 2
 fi
 COMPOSE_FILES=(-f docker-compose.yml -f docker-compose.cache.yml)
+# Per-service resource ceilings (docker-compose.limits.yml). Applied by default;
+# NO_LIMITS=1 skips them (e.g. profiling a service without a cap).
+if [[ -z "${NO_LIMITS:-}" && -f docker-compose.limits.yml ]]; then
+  COMPOSE_FILES+=(-f docker-compose.limits.yml)
+  echo "==> resource ceilings on (docker-compose.limits.yml; NO_LIMITS=1 to skip)"
+fi
 
 mapfile -t TARGET_SERVICES < <(
   if (( ${#SERVICES[@]} > 0 )); then
