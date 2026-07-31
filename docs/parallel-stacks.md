@@ -157,20 +157,29 @@ it needs one baseline `traefik` recreate.
   **changed** services rebuild. The dial between "one changed service" and "full
   stack" is just how many services the workspaces file lists.
 
-### console-web through the ingress
+### console-web is a static build (light)
 
-`console-web` is a Vite dev server, historically the traefik exception (direct
-host port `:3001` only). It now also carries traefik labels, so it's reachable
-at `http://console.localhost:8080` on baseline and `http://console.localhost:<port>`
-in a clone (where the `:3001` host port is stripped). Vite 7 blocks unknown Host
-headers, so the compose sets `__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS=console.localhost`
-— Vite's own env hook, so `vite.config.ts` (sealed) is untouched and the prod
-static build (no Vite) is unaffected. HMR's WS upgrade is proxied by traefik.
+`console-web` no longer runs `bun dev` — it's a **multi-stage build** (bun builds
+the SPA → served by `caddy:2-alpine`), routed at `http://console.localhost:8080`.
+~102 MB image, ~caddy RAM instead of ~268 MB of bun+vite; no `node_modules`
+volume, no source bind-mount.
 
-> Note: console-web's dev proxy targets (`VITE_*_BASE_URL`) must resolve to the
-> clone's own services for a clone's UI to be fully wired — they use in-network
-> service names, so within the clone network they already point at the clone's
-> instances.
+- The SPA calls every backend by **absolute URL** (`raksha.localhost:8080`,
+  `brahmi.localhost:8080`, …), **baked at build time** from `../console-web/.env.local`
+  (Vite `build` loads `.env.local`). Even dev-JWT sign-in hits raksha absolutely,
+  so caddy is **pure static** (SPA fallback via `try_files … /index.html`) — no
+  reverse proxy.
+- URLs the stack knows but that may be absent from `.env.local` (`ikki`,
+  `skills-registry`) are passed as **build args** and appended to `.env.local`
+  before the build (compose interpolation escaped as `$$VAR` so the ARG survives).
+- **CORS:** served at `console.localhost:8080`, its absolute calls are
+  cross-origin. raksha's matcher already allows any `*.localhost` (hostname
+  suffix, port-agnostic); the glafa services (Fiber, exact match) needed
+  `http://console.localhost:8080` added to the `ALLOWED_ORIGINS` anchor (one line).
+- **Trade-off:** no HMR — rebuild with `stack up console-web` to pick up code
+  changes. For fork consoles (`console-<x>.localhost`), glafa's exact CORS would
+  need each origin (or a suffix-matcher ported from raksha — a shared-framework
+  follow-up).
 
 ### Known Phase-1 limitations
 

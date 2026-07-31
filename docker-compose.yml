@@ -236,7 +236,7 @@ x-admin-ids: &admin-ids
 # With `https://srclode.online` in the list, Hostname() == "srclode.online",
 # which then suffix-matches every `*.srclode.online` subdomain.
 x-allowed-origins: &allowed-origins
-  ALLOWED_ORIGINS: "http://localhost:3000,http://localhost:3001,http://localhost:5173,http://localhost:8080,https://srclode.online,https://clode.space"
+  ALLOWED_ORIGINS: "http://localhost:3000,http://localhost:3001,http://localhost:5173,http://localhost:8080,http://console.localhost:8080,https://srclode.online,https://clode.space"
 
 # aramb-vm knobs routed through ec2mock. Merged into both brahmi pods so
 # either can process a cloud-provision request via the VM path. AWS creds
@@ -1725,55 +1725,48 @@ services:
   # on start reconciles it to whichever checkout is mounted.
   # ------------------------------------------------------------------
   console-web:
-    image: oven/bun:1
-    working_dir: /app
-    # --backend=copyfile: node_modules is a separate docker volume from bun's
-    # in-image cache, and bun's default hardlink backend cannot link across
-    # filesystems (it fails mid-extract, e.g. on wrangler). copyfile crosses
-    # the boundary reliably.
-    # dev-entrypoint.sh installs from npm by default; when the workspace selects a
-    # local aramb-sdk-node worktree (LOCAL_SDK=1, mounted at /aramb-sdk-node) it
-    # links that built copy instead — so an unpublished SDK works locally.
-    command: ["sh", "/dev-entrypoint.sh"]
-    env_file: [../console-web/.env.local]
-    environment:
-      # "1" only when workspaces.yaml selects an `aramb-sdk-node:` line (up.sh
-      # then exports ARAMB_SDK_NODE_DIR); empty otherwise → npm path, manifest
-      # left as-is. Do NOT hardcode — this is the opt-in switch.
-      LOCAL_SDK: "${ARAMB_SDK_NODE_DIR:+1}"
-      # ikki (browser-session manager) base for the Browser tab's recording
-      # fetch. env.ts uses this as the BROWSER's absolute ikki base (not just a
-      # server-side proxy target), so it must be reachable from the host browser
-      # AND CORS-allowed by ikki. The traefik `ikki.localhost:8080` router fits
-      # (ikki's ALLOWED_ORIGINS includes localhost:3001). An in-network address
-      # like ikki:7602 breaks here — the host browser can't resolve it.
-      VITE_IKKI_BASE_URL: http://ikki.localhost:8080
-      # Vite 7 blocks unknown Host headers. Allow the traefik route
-      # (console.localhost) so the dev server is reachable through the single
-      # ingress — on baseline (:8080) AND in a `stack fork` clone (:<port>),
-      # where the direct :3001 host port is stripped. Appended to allowedHosts
-      # via Vite's own env hook, so vite.config stays untouched and the prod
-      # static build (which never runs Vite) is unaffected.
-      __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS: console.localhost
-    ports:
-      - "3001:3001"
-    volumes:
-      - ${CONSOLE_WEB_DIR:-../console-web}:/app
-      - console_web_node_modules:/app/node_modules
-      - ./scripts/console-web-dev-entrypoint.sh:/dev-entrypoint.sh:ro
-      # The aramb-sdk-node checkout (worktree when selected, else the main repo —
-      # ignored unless LOCAL_SDK is set). Bind-mounted so the SDK can build in place.
-      - ${ARAMB_SDK_NODE_DIR:-../aramb-sdk-node}:/aramb-sdk-node
+    # Static production build served by caddy — no bun-dev, no node_modules
+    # volume, no source at runtime. The SPA calls every backend by ABSOLUTE URL
+    # (raksha.localhost:8080, brahmi.localhost:8080, …), baked at BUILD time from
+    # ../console-web/.env.local (Vite `build` loads .env.local). Even dev-JWT
+    # sign-in hits raksha absolutely, so a plain static file server is all that
+    # runs — no reverse proxy. Rebuild (`stack up console-web`) to pick up code
+    # changes; there is no HMR. VITE_* URLs the stack knows but that may be
+    # absent from .env.local (ikki, skills-registry) are supplied as build args
+    # and appended to .env.local before the build.
+    build:
+      context: ${CONSOLE_WEB_DIR:-../console-web}
+      args:
+        VITE_IKKI_BASE_URL: http://ikki.localhost:8080
+        VITE_SKILLS_REGISTRY_BASE_URL: http://skills-registry.localhost:8080
+      dockerfile_inline: |
+        FROM oven/bun:1 AS build
+        WORKDIR /app
+        COPY . .
+        ARG VITE_IKKI_BASE_URL
+        ARG VITE_SKILLS_REGISTRY_BASE_URL
+        RUN { echo "VITE_IKKI_BASE_URL=$$VITE_IKKI_BASE_URL"; \
+              echo "VITE_SKILLS_REGISTRY_BASE_URL=$$VITE_SKILLS_REGISTRY_BASE_URL"; } >> .env.local
+        RUN bun install --backend=copyfile
+        RUN bun run build
+        FROM caddy:2-alpine
+        COPY --from=build /app/dist /srv
+        RUN printf '%s\n' \
+          ':8080 {' \
+          '  encode gzip' \
+          '  root * /srv' \
+          '  try_files {path} /index.html' \
+          '  file_server' \
+          '}' > /etc/caddy/Caddyfile
+        EXPOSE 8080
+    image: clode-console-web:latest
     networks: [clode]
     labels:
       - traefik.enable=true
-      # console-web through the single ingress: http://console.localhost:8080
-      # (and http://console.localhost:<port> in a `stack fork` clone). The
-      # direct :3001 host port still works on baseline; a clone strips it and
-      # reaches the UI only via this route. WS upgrade (Vite HMR) is proxied by
-      # traefik automatically.
+      # single ingress: http://console.localhost:8080 (and console.localhost:<port>
+      # in a `stack fork` clone). caddy serves the SPA on :8080.
       - traefik.http.routers.console-web.rule=Host(`console.localhost`)
-      - traefik.http.services.console-web.loadbalancer.server.port=3001
+      - traefik.http.services.console-web.loadbalancer.server.port=8080
     restart: unless-stopped
 
 volumes:
