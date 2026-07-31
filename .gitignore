@@ -15,3 +15,6 @@ docker-compose.cache.yml
 
 # generated per-clone compose overlays (stack fork)
 .forks/
+
+# never commit console-web env files (URLs live as Dockerfile ARG defaults)
+docker/console-web/*.env

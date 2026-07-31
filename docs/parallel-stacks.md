@@ -200,10 +200,18 @@ Instead of cloning the whole compose, run a single forked service **on the
 existing `clode` network** alongside baseline:
 
 ```
-stack wfork <svc> --name <n> [--image <img>]   # run <svc>-<n> (default image: baseline)
+stack wfork <svc> --name <n> [--image <img>]          # run <svc>-<n> (default image: baseline)
+stack wfork console-web --name <n> --fork <svc,svc>   # fork console: rebuild with those backends → -<n>
 stack wfork-down <svc>-<n>
 stack wfork-ls
 ```
+
+**console-web forks by build-time URL override — no routing.** `console-web` bakes
+its backend URLs at build, so a fork console is a rebuild where the `--fork`'d
+services' `VITE_*` URLs are overridden to `<svc>-<n>.localhost` and everything
+else stays baseline. Served at `console-web-<n>.localhost:8080`. The routes are
+frozen into that bundle (open devtools and they're literally the fork's) — the
+Origin/source-IP routing layer is only for service-to-service, not the browser.
 
 `<svc>-<n>` joins the `clode` network, is routed by the baseline traefik at
 `http://<svc>-<n>.localhost:8080`, and inherits the baseline service's env, port,

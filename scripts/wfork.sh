@@ -28,6 +28,17 @@ REPO_DIR="$PWD"                          # where the compose files (+ my edits) 
 STACK_DIR="${CLODE_STACK_DIR:-$PWD}"     # canonical checkout for path resolution (../<svc>, .env)
 NET=clode
 
+# console-web is special: it's a static build with the VITE_* backend URLs BAKED
+# in, so a fork console is a rebuild with the forked services' URLs overridden
+# (host <svc> → <svc>-<name>). These map a service to the VITE_ var the SPA reads
+# and any path suffix on its baseline URL. See docker/console-web/Dockerfile.
+declare -A _VITE_VAR=(
+  [aramb-gateway]=VITE_GATEWAY_BASE_URL   [raksha]=VITE_RAKSHA_BASE_URL
+  [brahmi]=VITE_BRAHMI_BASE_URL           [jumbo]=VITE_JUMBO_BASE_URL
+  [cha-ching]=VITE_CHACHING_BASE_URL      [toolkit-proxy]=VITE_TOOLKIT_PROXY_BASE_URL
+  [skills-registry]=VITE_SKILLS_REGISTRY_BASE_URL [ikki]=VITE_IKKI_BASE_URL )
+declare -A _VITE_SUFFIX=( [jumbo]=/api/v1 [cha-ching]=/api/v1 [toolkit-proxy]=/api/v1 )
+
 die()  { echo "wfork: $*" >&2; exit 2; }
 info() { echo "==> $*"; }
 
@@ -39,21 +50,56 @@ _config_json() {
   docker compose --project-directory "$STACK_DIR" "${files[@]}" config --format json
 }
 
+# console-web fork: rebuild the static console with the forked backends' URLs
+# overridden (build-time), run it at console-web-<name>.localhost. No routing —
+# the routes are frozen into this fork's bundle. Unlisted backends stay baseline.
+_console_up() {
+  local name=$1 forked=$2
+  local cname="console-web-${name}" img="clode-console-web-${name}:latest"
+  docker ps -a --format '{{.Names}}' | grep -qx "$cname" && die "$cname already exists (wfork down $cname first)"
+  local bargs=() s fsvcs
+  if [[ -n "$forked" ]]; then
+    IFS=',' read -ra fsvcs <<<"$forked"
+    for s in "${fsvcs[@]}"; do
+      s="${s// /}"; [[ -z "$s" ]] && continue
+      [[ -n "${_VITE_VAR[$s]:-}" ]] || die "console fork: no VITE_ mapping for '$s' (browser-facing services only)"
+      bargs+=(--build-arg "${_VITE_VAR[$s]}=http://${s}-${name}.localhost:8080${_VITE_SUFFIX[$s]:-}")
+    done
+  fi
+  info "building fork console '$cname' (forked backends: ${forked:-none} → -${name}; rest baseline)"
+  DOCKER_BUILDKIT=1 docker build \
+    -f "$REPO_DIR/docker/console-web/Dockerfile" \
+    --build-context "src=${CONSOLE_WEB_DIR:-$STACK_DIR/../console-web}" \
+    "${bargs[@]}" -t "$img" "$REPO_DIR/docker/console-web"
+  info "starting $cname"
+  docker run -d --name "$cname" --network "$NET" --restart unless-stopped \
+    --label com.docker.compose.project=clode --label clode.wfork=1 --label clode.wfork.svc=console-web \
+    --label traefik.enable=true \
+    --label "traefik.http.routers.${cname}.rule=Host(\`${cname}.localhost\`)" \
+    --label "traefik.http.services.${cname}.loadbalancer.server.port=8080" \
+    "$img" >/dev/null
+  info "up: http://${cname}.localhost:8080   |   remove: stack wfork-down $cname"
+}
+
 cmd_up() {
-  local svc="" name="" image=""
+  local svc="" name="" image="" forked=""
   while (( $# )); do
     case "$1" in
       --name)    name="$2"; shift 2 ;;
       --name=*)  name="${1#--name=}"; shift ;;
       --image)   image="$2"; shift 2 ;;
       --image=*) image="${1#--image=}"; shift ;;
+      --fork)    forked="$2"; shift 2 ;;   # console-web only: CSV of forked backends
+      --fork=*)  forked="${1#--fork=}"; shift ;;
       -*)        die "unknown flag: $1" ;;
       *)         if [[ -z "$svc" ]]; then svc="$1"; else die "unexpected arg: $1"; fi; shift ;;
     esac
   done
-  [[ -n "$svc"  ]] || die "usage: stack wfork <svc> --name <n> [--image <img>]"
+  [[ -n "$svc"  ]] || die "usage: stack wfork <svc> --name <n> [--image <img>] [--fork <csv>]"
   [[ -n "$name" ]] || die "--name <n> is required"
   [[ "$name" =~ ^[a-z0-9][a-z0-9-]*$ ]] || die "--name must be [a-z0-9-]"
+  # console-web is a build-with-overrides, not a run-baseline-image path.
+  [[ "$svc" == "console-web" ]] && { _console_up "$name" "$forked"; return; }
   local cname="${svc}-${name}"
   image="${image:-clode-${svc}:latest}"
   docker image inspect "$image" >/dev/null 2>&1 || die "image not found: $image (build it, or pass --image)"
