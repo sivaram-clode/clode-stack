@@ -9,6 +9,13 @@
 # Subcommands:
 #   up [--public] [svc...] build + start (whole stack or a subset) + seed;
 #                          --public adds the cloudflared edge (see up.sh)
+#   fork <name> --port <p> [--workspaces <f>] [svc...]
+#                          start an isolated feature-branch CLONE of the stack
+#                          (own project + network + traefik host port); listed
+#                          services build from their branch, rest reuse baseline
+#                          images. Reached at <svc>.localhost:<p>. See fork.sh
+#   fork-down <name>      stop + drop a clone (its volumes/network too)
+#   fork-ls               list running clones + their traefik ports
 #   down                  stop; preserves volumes and everything else
 #   wipe [-y|-n]          total teardown: containers + volumes + images +
 #                          buildkit cache + agent containers + ec2mock
@@ -33,6 +40,9 @@ shift || true
 
 case "$cmd" in
   up)          exec scripts/up.sh       "$@" ;;
+  fork)        exec scripts/fork.sh up   "$@" ;;
+  fork-down)   exec scripts/fork.sh down "$@" ;;
+  fork-ls)     exec scripts/fork.sh ls   "$@" ;;
   down)        exec scripts/down.sh     "$@" ;;
   wipe)        exec scripts/wipe.sh     "$@" ;;
   cleanup|clean-up|clean) exec scripts/cleanup.sh "$@" ;;

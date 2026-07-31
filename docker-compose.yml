@@ -334,6 +334,10 @@ services:
       - --providers.docker=true
       - --providers.docker.exposedbydefault=false
       - --providers.docker.network=clode
+      # Only route THIS project's containers. Without it, a `stack fork` clone's
+      # containers (which reuse the same router labels, e.g. Host(`brahmi.localhost`))
+      # would be picked up here too and log route conflicts. Baseline is project `clode`.
+      - --providers.docker.constraints=Label(`com.docker.compose.project`,`clode`)
       - --entrypoints.web.address=:8080
       - --api.dashboard=true
       # ping serves the healthcheck; pin it to the web entrypoint —

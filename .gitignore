@@ -12,3 +12,6 @@ logs/
 # BuildKit cache-mount overlay — regenerated on every `stack up` by
 # scripts/gen-build-cache.sh. Generated artifact, not source.
 docker-compose.cache.yml
+
+# generated per-clone compose overlays (stack fork)
+.forks/
