@@ -16,6 +16,8 @@
 #                          images. Reached at <svc>.localhost:<p>. See fork.sh
 #   fork-down <name>      stop + drop a clone (its volumes/network too)
 #   fork-ls               list running clones + their traefik ports
+#   graph                 print the service relation map (A -> B = A needs B)
+#   resolve <svc...>      print the wake-closure for services + profiles to enable
 #   down                  stop; preserves volumes and everything else
 #   wipe [-y|-n]          total teardown: containers + volumes + images +
 #                          buildkit cache + agent containers + ec2mock
@@ -43,6 +45,8 @@ case "$cmd" in
   fork)        exec scripts/fork.sh up   "$@" ;;
   fork-down)   exec scripts/fork.sh down "$@" ;;
   fork-ls)     exec scripts/fork.sh ls   "$@" ;;
+  graph)       exec scripts/lib/depgraph.py graph   "$@" ;;
+  resolve)     exec scripts/lib/depgraph.py resolve "$@" ;;
   down)        exec scripts/down.sh     "$@" ;;
   wipe)        exec scripts/wipe.sh     "$@" ;;
   cleanup|clean-up|clean) exec scripts/cleanup.sh "$@" ;;

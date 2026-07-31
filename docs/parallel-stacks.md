@@ -37,6 +37,38 @@ stack fork-ls
   rebuilt and tagged `clode-stack/<svc>:<branch>`; every other service **reuses
   the baseline image** (`clode-<svc>:latest`) — no rebuild, no extra image disk.
 - **`[svc...]`** — optional subset to bring up (like `stack up`); omit for all.
+- **`--resolve`** — expand the given `[svc...]` seeds to their **dependency
+  closure** (see the resolver below) and auto-enable the profile gates that
+  closure needs, plus `traefik` + `whodb`. So `stack fork b1 --port 8180 --resolve
+  brahmi` wakes brahmi *and everything it needs* — nothing more.
+
+### Service relation map + dependency resolver
+
+`scripts/lib/depgraph.py` (exposed as `stack graph` / `stack resolve`) builds a
+**directed** service graph from the compose — an edge `A -> B` means *A needs B*.
+The edge source is **`depends_on`**, the stack's accurate "must be healthy/complete
+before I start" signal.
+
+> Why not scan env URLs? The shared `*service-urls` anchor injects every service
+> URL into ~22 services, so env-scanning would make it a near-complete mesh —
+> useless for minimal resolution. Runtime-only HTTP calls that aren't
+> health-gated (e.g. `brahmi -> jumbo`) are therefore not edges; add such a
+> service as an explicit seed if a clone needs it.
+
+Profile gates are **not** pruned — every service is a node tagged with its gate
+(`core` = always-on). `resolve` returns the transitive closure to wake **and the
+profile gates that closure touches** (it walks *across* gates, e.g.
+`intervix` → `vova` surfaces both `interview` and `voice`).
+
+```
+stack graph                     # full relation map (nodes, edges, gates)
+stack resolve brahmi            # brahmi + db, ec2mock, minio, minio-setup, raksha, redis
+stack resolve mang-proxy toolkit-proxy   # closure + "profiles to enable: tools"
+```
+
+`fork --resolve` chains this in: seeds → closure → per node, **rebuild from
+branch if it's in the workspaces file, else run the baseline image** (the
+build/mirror split), with the needed profiles enabled automatically.
 
 ### Addressing (derivable)
 

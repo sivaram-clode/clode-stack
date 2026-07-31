@@ -3,9 +3,13 @@
 # baseline, isolated in its own Compose project + network + traefik host port.
 #
 # Subcommands (dispatched from stack.sh):
-#   fork <name> --port <p> [--workspaces <f>] [svc...]   create + start a clone
+#   fork <name> --port <p> [--workspaces <f>] [--resolve] [svc...]  create + start a clone
 #   fork-down <name>                                     stop + drop a clone (volumes too)
 #   fork-ls                                              list running clones
+#
+# --resolve expands the given services to their dependency closure (via
+# scripts/lib/depgraph.py) and auto-enables the profile gates that closure needs,
+# plus traefik + whodb. Without it, the listed services (or all) come up as-is.
 #
 # A clone is `docker compose -p <name>` on network `<name>` with ITS OWN traefik
 # on host port <p>. Every service is reached at `http://<svc>.localhost:<p>` and
@@ -22,8 +26,9 @@
 # when running the script from a worktree whose ../ has no sibling repos.
 
 set -euo pipefail
-cd "$(dirname "$0")/.."
-STACK_DIR="${CLODE_STACK_DIR:-$PWD}"
+SCRIPTS_DIR="$(cd "$(dirname "$0")" && pwd)"   # the scripts/ dir these tools live in
+cd "$SCRIPTS_DIR/.."
+STACK_DIR="${CLODE_STACK_DIR:-$PWD}"           # canonical checkout for compose + sibling repos
 
 # Datastores / dev-servers whose host-port bindings are stripped in a clone
 # (reached in-network only). Keep in sync with the host `ports:` in the compose.
@@ -118,13 +123,14 @@ PY
 
 # ─────────────────────────────────────────────────────────────── fork up ───
 cmd_up() {
-  local name="" port="" wsfile="" services=()
+  local name="" port="" wsfile="" resolve=0 services=()
   while (( $# > 0 )); do
     case "$1" in
       --port)        [[ -n "${2:-}" ]] || die "--port requires a value"; port="$2"; shift 2 ;;
       --port=*)      port="${1#--port=}"; shift ;;
       --workspaces)  [[ -n "${2:-}" ]] || die "--workspaces requires a value"; wsfile="$2"; shift 2 ;;
       --workspaces=*) wsfile="${1#--workspaces=}"; shift ;;
+      --resolve)     resolve=1; shift ;;
       -*)            die "unknown flag: $1" ;;
       *)             if [[ -z "$name" ]]; then name="$1"; else services+=("$1"); fi; shift ;;
     esac
@@ -147,6 +153,22 @@ cmd_up() {
   source scripts/lib/workspaces.sh
   resolve_workspaces || die "workspace resolution failed"
   print_workspace_table
+
+  # --resolve: expand the given seeds to their dependency closure and the profile
+  # gates that closure needs (scripts/lib/depgraph.py). Turns "clone to test
+  # brahmi" into "wake brahmi + everything it needs", with profiles auto-enabled.
+  if (( resolve )); then
+    (( ${#services[@]} > 0 )) || die "--resolve needs at least one seed service"
+    local rj
+    rj="$(CLODE_STACK_DIR="$STACK_DIR" "$SCRIPTS_DIR/lib/depgraph.py" resolve "${services[@]}" --json)" \
+      || die "dependency resolve failed"
+    mapfile -t services < <(printf '%s' "$rj" | python3 -c 'import sys,json;print("\n".join(json.load(sys.stdin)["wake"]))')
+    local profs; profs="$(printf '%s' "$rj" | python3 -c 'import sys,json;print(",".join(json.load(sys.stdin)["profiles"]))')"
+    [[ -n "$profs" ]] && { export COMPOSE_PROFILES="$profs"; info "profiles enabled by closure: $profs"; }
+    # A clone always needs its ingress + DB viewer (nothing depends_on them).
+    services+=(traefik whodb)
+    info "resolved seed closure → ${#services[@]} services: ${services[*]}"
+  fi
 
   # Changed = a listed service whose resolved context differs from ../<svc>.
   # Each gets image clode-stack/<svc>:<branch> and is rebuilt; the rest reuse
