@@ -165,13 +165,19 @@ the SPA → served by `caddy:2-alpine`), routed at `http://console.localhost:808
 volume, no source bind-mount.
 
 - The SPA calls every backend by **absolute URL** (`raksha.localhost:8080`,
-  `brahmi.localhost:8080`, …), **baked at build time** from `../console-web/.env.local`
-  (Vite `build` loads `.env.local`). Even dev-JWT sign-in hits raksha absolutely,
-  so caddy is **pure static** (SPA fallback via `try_files … /index.html`) — no
-  reverse proxy.
-- URLs the stack knows but that may be absent from `.env.local` (`ikki`,
-  `skills-registry`) are passed as **build args** and appended to `.env.local`
-  before the build (compose interpolation escaped as `$$VAR` so the ARG survives).
+  `brahmi.localhost:8080`, …), **baked at build time**. Even dev-JWT sign-in hits
+  raksha absolutely, so caddy is **pure static** (SPA fallback via
+  `try_files … /index.html`) — no reverse proxy.
+- **Build files live in clode-stack, not the app repo** — `docker/console-web/`
+  holds the `Dockerfile`, `Caddyfile`, and **`console-web.env`** (the `VITE_*`
+  service URLs). The console-web SOURCE comes in as the `src` named build context
+  (`additional_contexts: { src: ${CONSOLE_WEB_DIR:-../console-web} }`), so the
+  compose stays clean and the Dockerfile is easy to extend. **Why clode-stack
+  owns the URLs:** the app's `.env.local` is *gitignored* (a worktree checkout
+  won't have it) **and** `.dockerignored` (never enters the build) — so it can't
+  be the source. The Dockerfile even `rm`s any app-local `.env*` so
+  `console-web.env` is authoritative and the build is identical from main or a
+  worktree.
 - **CORS:** served at `console.localhost:8080`, its absolute calls are
   cross-origin. raksha's matcher already allows any `*.localhost` (hostname
   suffix, port-agnostic); the glafa services (Fiber, exact match) needed
