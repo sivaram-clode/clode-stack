@@ -1748,6 +1748,13 @@ services:
       # (ikki's ALLOWED_ORIGINS includes localhost:3001). An in-network address
       # like ikki:7602 breaks here — the host browser can't resolve it.
       VITE_IKKI_BASE_URL: http://ikki.localhost:8080
+      # Vite 7 blocks unknown Host headers. Allow the traefik route
+      # (console.localhost) so the dev server is reachable through the single
+      # ingress — on baseline (:8080) AND in a `stack fork` clone (:<port>),
+      # where the direct :3001 host port is stripped. Appended to allowedHosts
+      # via Vite's own env hook, so vite.config stays untouched and the prod
+      # static build (which never runs Vite) is unaffected.
+      __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS: console.localhost
     ports:
       - "3001:3001"
     volumes:
@@ -1758,6 +1765,15 @@ services:
       # ignored unless LOCAL_SDK is set). Bind-mounted so the SDK can build in place.
       - ${ARAMB_SDK_NODE_DIR:-../aramb-sdk-node}:/aramb-sdk-node
     networks: [clode]
+    labels:
+      - traefik.enable=true
+      # console-web through the single ingress: http://console.localhost:8080
+      # (and http://console.localhost:<port> in a `stack fork` clone). The
+      # direct :3001 host port still works on baseline; a clone strips it and
+      # reaches the UI only via this route. WS upgrade (Vite HMR) is proxied by
+      # traefik automatically.
+      - traefik.http.routers.console-web.rule=Host(`console.localhost`)
+      - traefik.http.services.console-web.loadbalancer.server.port=3001
     restart: unless-stopped
 
 volumes:

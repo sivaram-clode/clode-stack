@@ -391,6 +391,6 @@ else
   has louie         && echo "    ℹ louie: tunnel URLs (*.tunnel.localhost:8080) resolve on this host only"
   echo "    ingress: http://<svc>.localhost:8080 (traefik dashboard: http://traefik.localhost:8080)"
 fi
-# console-web is the dev-server exception — served on its own host port with
-# HMR, not through traefik. Announce it in both modes.
-has console-web && echo "    ▶ console-web: http://localhost:3001 (Vite dev server + hot reload; not via traefik)"
+# console-web (Vite dev server) is reachable BOTH directly on its host port
+# and — since it now carries traefik labels — through the single ingress.
+has console-web && echo "    ▶ console-web: http://console.localhost:8080 (via traefik) or http://localhost:3001 (direct); Vite HMR on both"

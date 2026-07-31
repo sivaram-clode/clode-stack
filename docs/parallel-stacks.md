@@ -93,13 +93,25 @@ it needs one baseline `traefik` recreate.
   **changed** services rebuild. The dial between "one changed service" and "full
   stack" is just how many services the workspaces file lists.
 
+### console-web through the ingress
+
+`console-web` is a Vite dev server, historically the traefik exception (direct
+host port `:3001` only). It now also carries traefik labels, so it's reachable
+at `http://console.localhost:8080` on baseline and `http://console.localhost:<port>`
+in a clone (where the `:3001` host port is stripped). Vite 7 blocks unknown Host
+headers, so the compose sets `__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS=console.localhost`
+— Vite's own env hook, so `vite.config.ts` (sealed) is untouched and the prod
+static build (no Vite) is unaffected. HMR's WS upgrade is proxied by traefik.
+
+> Note: console-web's dev proxy targets (`VITE_*_BASE_URL`) must resolve to the
+> clone's own services for a clone's UI to be fully wired — they use in-network
+> service names, so within the clone network they already point at the clone's
+> instances.
+
 ### Known Phase-1 limitations
 
-- `console-web` (a Vite dev server, not behind traefik) has its host port
-  stripped in a clone, so its UI isn't reachable in a clone yet — Phase 2 routes
-  it through traefik. Backend/API/agent testing is unaffected.
 - Per-clone ports mean the clone is identified by port, not hostname (Phase 2
-  fixes that).
+  moves the clone into the hostname so one shared ingress serves all clones).
 
 ---
 
