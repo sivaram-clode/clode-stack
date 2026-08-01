@@ -1,238 +1,218 @@
 {
-  "aramb-gateway": {
-    "gate": "core",
-    "buildable": true,
-    "calls": [
-      "brahmi",
-      "cha-ching",
-      "raksha"
-    ]
+  "_meta": {
+    "source": "code-verified call sites (4-agent audit), 2026-08",
+    "legend_rw": "R=read, W=writes/mutates peer state, RW=both, mint=issues an auth token",
+    "note": "calls = VERIFIED runtime service edges (a real client call site exists). Nodes keyed by service; keys starting with _ are metadata. _dead_env = URL read from env but never called (NOT a dependency). _indirect = not a runtime call by this service (config injected into the agent, which makes the call).",
+    "fork_rule": "A forked service falling through to a baseline peer is safe for R edges; W edges MUTATE baseline state (create projects/deploys, mint identities, publish templates, consume pool agents) and must be isolated or explicitly accepted."
   },
+
   "brahmi": {
-    "gate": "core",
-    "buildable": true,
-    "calls": [
-      "cha-ching",
-      "chil",
-      "gitana",
-      "ikki",
-      "intervix",
-      "jumbo",
-      "louie",
-      "mang-proxy",
-      "pool-manager",
-      "raksha",
-      "redis",
-      "skills-registry",
-      "toolkit-proxy"
-    ]
+    "gate": "core", "buildable": true,
+    "calls": {
+      "jumbo":           {"rw": "W",  "for": "create projects/apps/services + trigger deployments (highest blast radius)"},
+      "raksha":          {"rw": "W",  "for": "mint org service-account tokens + write onboarding status"},
+      "chil":            {"rw": "W",  "for": "provision chil capability + chat surface for a project"},
+      "skills-registry": {"rw": "RW", "for": "read workflow/agent templates; publish/update agent templates"},
+      "pool-manager":    {"rw": "W",  "for": "claim a pooled agent; verify service slug; poll pool config"},
+      "mang-proxy":      {"rw": "RW", "for": "list providers/models, check org quota, run content-review LLM passes"},
+      "cha-ching":       {"rw": "R",  "for": "poll credits-per-USD ratio + model pricing to cost agent usage"},
+      "gitana":          {"rw": "R",  "for": "mint short-lived GitHub App installation tokens for agents"},
+      "ikki":            {"rw": "R",  "for": "fetch browser-session usage for the org usage summary"},
+      "toolkit-proxy":   {"rw": "R",  "for": "list Composio connections/toolkits/tools + fetch git credentials"}
+    }
   },
-  "cha-ching": {
-    "gate": "core",
-    "buildable": true,
-    "calls": [
-      "brahmi",
-      "ikki",
-      "jumbo",
-      "mang-proxy",
-      "raksha"
-    ]
+
+  "aramb-gateway": {
+    "gate": "core", "buildable": true,
+    "calls": {
+      "brahmi":    {"rw": "RW",   "for": "Playground/Share runtime turn over WS + agent CRUD/publish/list (BRAHMI_URL + BRAHMI_WS_URL)"},
+      "raksha":    {"rw": "mint", "for": "validate builder keys + mint org/runtime SA tokens used to call brahmi"},
+      "cha-ching": {"rw": "R",    "for": "per-product / per-workspace usage showback"}
+    }
   },
-  "chil": {
-    "gate": "org",
-    "buildable": true,
-    "calls": [
-      "brahmi",
-      "jumbo",
-      "raksha",
-      "skills-registry"
-    ]
-  },
-  "cloudflared": {
-    "gate": "public",
-    "buildable": false,
-    "calls": []
-  },
-  "console-web": {
-    "gate": "core",
-    "buildable": false,
-    "calls": []
-  },
-  "databend": {
-    "gate": "core",
-    "buildable": false,
-    "calls": []
-  },
-  "db": {
-    "gate": "core",
-    "buildable": false,
-    "calls": []
-  },
-  "ec2mock": {
-    "gate": "core",
-    "buildable": true,
-    "calls": [
-      "brahmi",
-      "jumbo"
-    ]
-  },
-  "gitana": {
-    "gate": "git",
-    "buildable": true,
-    "calls": []
-  },
-  "ikki": {
-    "gate": "browser",
-    "buildable": true,
-    "calls": [
-      "brahmi",
-      "cha-ching",
-      "jumbo",
-      "louie",
-      "raksha",
-      "redis"
-    ]
-  },
-  "intervix": {
-    "gate": "interview",
-    "buildable": true,
-    "calls": [
-      "brahmi",
-      "db",
-      "jumbo",
-      "raksha",
-      "redis",
-      "vova"
-    ]
-  },
-  "jumbo": {
-    "gate": "core",
-    "buildable": true,
-    "calls": [
-      "db",
-      "gitana",
-      "narnia",
-      "redis"
-    ]
-  },
-  "k3s": {
-    "gate": "deploy",
-    "buildable": true,
-    "calls": []
-  },
-  "louie": {
-    "gate": "browser",
-    "buildable": true,
-    "calls": [
-      "ikki",
-      "jumbo",
-      "raksha",
-      "redis"
-    ]
-  },
-  "mang-proxy": {
-    "gate": "core",
-    "buildable": true,
-    "calls": [
-      "cha-ching",
-      "jumbo",
-      "raksha",
-      "redis"
-    ]
-  },
+
   "mcp-server": {
-    "gate": "mcp",
-    "buildable": true,
-    "calls": []
+    "gate": "mcp", "buildable": true,
+    "calls": {
+      "brahmi": {"rw": "RW", "for": "proxy all aramb-workflows MCP tools + chat/exec/workflow to brahmi"},
+      "raksha": {"rw": "R",  "for": "fetch JWKS to verify inbound Bearer tokens (auth only)"}
+    }
   },
-  "minio": {
-    "gate": "core",
-    "buildable": false,
-    "calls": []
+
+  "console-web": {
+    "gate": "core", "buildable": true,
+    "calls": {
+      "brahmi":          {"rw": "RW", "for": "control-plane UI: agents, conversations, workflows, Architect/console chat"},
+      "aramb-gateway":   {"rw": "RW", "for": "Playground + Share runtime chat (SDK/WS lane)"},
+      "raksha":          {"rw": "RW", "for": "OAuth login, email auth, token refresh, API keys"},
+      "cha-ching":       {"rw": "R",  "for": "credits wallet + billing/usage-overview (+Stripe POST)"},
+      "toolkit-proxy":   {"rw": "RW", "for": "Integrations page: Composio toolkit catalogue + OAuth connections"},
+      "skills-registry": {"rw": "R",  "for": "skill/template catalogue (Configure picker, browse templates)"},
+      "ikki":            {"rw": "R",  "for": "browser-session detail + presigned recording URL on conversation page"}
+    }
   },
-  "minio-setup": {
-    "gate": "core",
-    "buildable": false,
-    "calls": []
+
+  "cha-ching": {
+    "gate": "core", "buildable": true,
+    "calls": {
+      "jumbo":      {"rw": "W",    "for": "push per-org CPU/mem resource quota; read quota usage"},
+      "mang-proxy": {"rw": "W",    "for": "push per-org LLM rate-limit windows; read windowed usage"},
+      "brahmi":     {"rw": "R",    "for": "pull VM + pod compute-usage buckets for the usage summary"},
+      "ikki":       {"rw": "R",    "for": "pull browser-session usage for the usage summary"},
+      "raksha":     {"rw": "mint", "for": "mint admin org SA token to auth outbound calls"}
+    }
   },
-  "narnia": {
-    "gate": "deploy",
-    "buildable": true,
-    "calls": [
-      "jumbo"
-    ]
+
+  "ikki": {
+    "gate": "browser", "buildable": true,
+    "calls": {
+      "brahmi":    {"rw": "W",    "for": "push browser-session lifecycle events (brahmi relays to console live view)"},
+      "cha-ching": {"rw": "W",    "for": "deliver browser-session usage-ledger events"},
+      "jumbo":     {"rw": "W",    "for": "provision headless/headed browser containers as jumbo services"},
+      "louie":     {"rw": "R",    "for": "tunnel CDP traffic via the louie broker + read louie usage"},
+      "raksha":    {"rw": "mint", "for": "mint org SA tokens (auth to cha-ching; stamp agent identity)"}
+    }
   },
-  "narnia-workers": {
-    "gate": "deploy",
-    "buildable": true,
-    "calls": [
-      "gitana",
-      "jumbo",
-      "narnia",
-      "raksha"
-    ]
-  },
-  "notify": {
-    "gate": "email",
-    "buildable": true,
-    "calls": []
-  },
-  "oauth-mock": {
-    "gate": "core",
-    "buildable": true,
-    "calls": []
-  },
+
   "pool-manager": {
-    "gate": "pool",
-    "buildable": true,
-    "calls": [
-      "brahmi",
-      "ikki",
-      "jumbo",
-      "raksha"
-    ]
+    "gate": "pool", "buildable": true,
+    "calls": {
+      "jumbo":  {"rw": "W",    "for": "create/deploy/reap the pool's agent (VM/browser) services (core dependency)"},
+      "raksha": {"rw": "mint", "for": "mint the pool-owner SA token presented to jumbo"}
+    }
   },
+
   "raksha": {
-    "gate": "core",
-    "buildable": true,
-    "calls": [
-      "cha-ching",
-      "jumbo",
-      "notify",
-      "redis"
-    ]
+    "gate": "core", "buildable": true,
+    "calls": {
+      "jumbo":     {"rw": "RW", "for": "resolve workspace scope (R); grant/purge memberships, transfer/create workspaces (W)"},
+      "cha-ching": {"rw": "W",  "for": "create org billing record on signup; merge credits on org transfer"},
+      "notify":    {"rw": "W",  "for": "send transactional emails (invites, auth flows)"}
+    }
   },
-  "redis": {
-    "gate": "core",
-    "buildable": false,
-    "calls": []
+
+  "mang-proxy": {
+    "gate": "core", "buildable": true,
+    "calls": {
+      "cha-ching": {"rw": "W",    "for": "post batched LLM usage-event ledger rows for billing"},
+      "jumbo":     {"rw": "R",    "for": "validate project/app access before proxying"},
+      "raksha":    {"rw": "mint", "for": "mint org-default SA token for the usage poster"}
+    }
   },
-  "skills-registry": {
-    "gate": "skills",
-    "buildable": true,
-    "calls": [
-      "gitana"
-    ]
+
+  "jumbo": {
+    "gate": "core", "buildable": true,
+    "calls": {
+      "narnia": {"rw": "W", "for": "send deployment batches to the orchestrator to run builds/deploys"},
+      "akela":  {"rw": "R", "for": "fetch a service's secret value to validate/pull private images"}
+    }
   },
+
   "toolkit-proxy": {
-    "gate": "tools",
-    "buildable": true,
-    "calls": [
-      "gitana",
-      "jumbo"
-    ]
+    "gate": "tools", "buildable": true,
+    "calls": {
+      "gitana": {"rw": "R", "for": "GitHub OAuth initiate, connection status, installation credentials"},
+      "jumbo":  {"rw": "R", "for": "fetch project audience (members) for member-scope resolution"}
+    }
   },
-  "traefik": {
-    "gate": "core",
-    "buildable": false,
-    "calls": []
+
+  "skills-registry": {
+    "gate": "skills", "buildable": true,
+    "calls": {
+      "gitana": {"rw": "R", "for": "mint per-repo GitHub installation token to read private skill repos"}
+    }
   },
+
+  "chil": {
+    "gate": "org", "buildable": true,
+    "calls": {
+      "brahmi": {"rw": "W", "for": "create tasks/apps, onboard orgs, stream chat prompts to the orchestrator"},
+      "jumbo":  {"rw": "W", "for": "list/create projects & applications, sync members (Slack/Telegram onboarding)"},
+      "raksha": {"rw": "W", "for": "onboard users/orgs, mint SA tokens, lookups, onboarding status (+ dev-JWT fallback)"}
+    }
+  },
+
+  "intervix": {
+    "gate": "interview", "buildable": true,
+    "calls": {
+      "brahmi": {"rw": "W",  "for": "create interview app, set interviewer prompt, stream turns, read history"},
+      "jumbo":  {"rw": "W",  "for": "ensure product workspace + create the project scoping the interview"},
+      "raksha": {"rw": "RW", "for": "JWKS verify (R) + mint per-session SA token + OAuth exchange (W)"},
+      "vova":   {"rw": "W",  "for": "proxy candidate voice WS to vova (only when VOVA_ENABLED)"}
+    }
+  },
+
   "vova": {
-    "gate": "voice",
-    "buildable": true,
-    "calls": [
-      "brahmi",
-      "redis"
-    ]
-  }
+    "gate": "voice", "buildable": true,
+    "calls": {
+      "brahmi": {"rw": "W", "for": "create app per conversation, set prompt, stream each turn (drive the LLM)"}
+    }
+  },
+
+  "louie": {
+    "gate": "browser", "buildable": true,
+    "calls": {
+      "ikki":   {"rw": "R", "for": "cloud-connect registers on ikki + fetches syntho/proxy creds (gRPC)"},
+      "raksha": {"rw": "R", "for": "OIDC discovery + JWKS to validate inbound tokens on the broker"}
+    }
+  },
+
+  "narnia": {
+    "gate": "deploy", "buildable": true,
+    "calls": {
+      "jumbo": {"rw": "W", "for": "post terminal deployment status/outputs back to the book-keeper"}
+    }
+  },
+
+  "narnia-workers": {
+    "gate": "deploy", "buildable": true,
+    "calls": {
+      "jumbo":  {"rw": "RW",   "for": "pull deployment config (R); write status/outputs, bulk services (W)"},
+      "narnia": {"rw": "RW",   "for": "read step outputs (R); post per-line-item status (W)"},
+      "gitana": {"rw": "RW",   "for": "GitHub tokens (R); create PRs, push secrets, dispatch workflows (W)"},
+      "raksha": {"rw": "mint", "for": "mint org SA token for downstream auth"},
+      "akela":  {"rw": "RW",   "for": "read/upsert per-service secrets during manifest build/deploy"},
+      "hathi":  {"rw": "W",    "for": "hand the built manifest to hathi to deploy the frontend"}
+    }
+  },
+
+  "ec2mock": {
+    "gate": "core", "buildable": true,
+    "calls": {
+      "jumbo": {"rw": "RW", "for": "narnia-facade: pull each deployment's config (R) + post terminal status callbacks (W)"}
+    }
+  },
+
+  "gitana":      {"gate": "git",      "buildable": true,  "calls": {}},
+  "notify":      {"gate": "email",    "buildable": true,  "calls": {}},
+  "oauth-mock":  {"gate": "core",     "buildable": true,  "calls": {}},
+
+  "db":          {"gate": "core",     "buildable": false, "calls": {}},
+  "redis":       {"gate": "core",     "buildable": false, "calls": {}},
+  "minio":       {"gate": "core",     "buildable": false, "calls": {}},
+  "minio-setup": {"gate": "core",     "buildable": false, "calls": {}},
+  "databend":    {"gate": "core",     "buildable": false, "calls": {}},
+  "traefik":     {"gate": "core",     "buildable": false, "calls": {}},
+  "k3s":         {"gate": "deploy",   "buildable": false, "calls": {}},
+  "cloudflared": {"gate": "public",   "buildable": false, "calls": {}},
+
+  "akela":       {"gate": "external", "buildable": false, "calls": {}},
+  "hathi":       {"gate": "external", "buildable": false, "calls": {}},
+
+  "_dead_env": [
+    {"from": "brahmi",      "to": "intervix",        "why": "INTERVIX_MCP_URL only injected into the agent MCP bootstrap; brahmi never calls intervix"},
+    {"from": "brahmi",      "to": "louie",           "why": "LOUIE_BROKER_ADDR only seeded into agent env; louie/pkg/peerpool is a vendored brahmi<->brahmi clustering lib"},
+    {"from": "brahmi",      "to": "juno",            "why": "JUNO_MCP_URL only injected into the agent MCP bootstrap"},
+    {"from": "brahmi",      "to": "anthropic",       "why": "ANTHROPIC_BASE_URL rewritten to point agents at mang-proxy; brahmi makes no direct Anthropic call"},
+    {"from": "jumbo",       "to": "gitana",          "why": "GitanaClient constructed but DispatchWorkflow has zero callers"},
+    {"from": "chil",        "to": "skills-registry", "why": "SkillsRegistryClient never constructed/invoked"},
+    {"from": "console-web", "to": "jumbo",           "why": "VITE_JUMBO_BASE_URL has no consumer in src; jumbo reached only via brahmi"},
+    {"from": "louie",       "to": "jumbo",           "why": "JUMBO_ADDR referenced only in e2e tests; no production dial"},
+    {"from": "ec2mock",     "to": "brahmi",          "why": "inbound only: brahmi calls the ec2mock AWS API; ec2mock never dials brahmi"}
+  ],
+
+  "_indirect": [
+    {"from": "pool-manager", "to": "brahmi", "via": "injects BRAHMI_URL into the agent service-config (jumbo/service_config.go)", "note": "the provisioned AGENT calls brahmi, not pool-manager; to route pooled agents at a fork, change this injected value"},
+    {"from": "pool-manager", "to": "ikki",   "via": "injects IKKI_GRPC_ADDR into the aramb-browser service-config", "note": "the agent connects to ikki, not pool-manager"}
+  ]
 }

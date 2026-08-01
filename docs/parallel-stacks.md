@@ -44,40 +44,36 @@ stack fork-ls
 
 ### Service relation map + dependency resolver
 
-`scripts/lib/depgraph.py` (exposed as `stack graph` / `stack resolve`) builds a
-**directed** service graph where `A -> B` means **A calls B**. Edges are the
-**actual call graph**, derived by grepping each service repo's `.go` source for
-the peer URL env-var names it reads (`JUMBO_URL`, `TOOLKIT_PROXY_BASE_URL`,
-`POOL_MANAGER_URL`, …) and mapping each name to the service it points at.
+`scripts/lib/depgraph.py` (exposed as `stack graph` / `stack resolve` / `stack
+check`) reads the **code-verified annotated graph** `scripts/lib/service-graph.json`.
+Each service has `{gate, buildable, calls:{peer:{rw, for}}}` where `rw` = **R**
+(read) | **W** (writes/mutates the peer) | **RW** | **mint** (issues a token),
+and `for` describes what the call does. Every edge was confirmed against an actual
+client **call site** (a 4-repo audit), so it's the real runtime call graph — not
+`depends_on` (boot order) and not the compose env (the `*service-urls` anchor
+injects URLs into ~22 services regardless of use). Non-dependencies are recorded
+explicitly: `_dead_env` (URL read but never called — e.g. `console-web→jumbo`,
+`jumbo→gitana`) and `_indirect` (config injected into the agent, e.g. `pool-manager`
+seeds `BRAHMI_URL` into the agent, which makes the call).
 
-> **Not `depends_on`** — that's only boot order (brahmi doesn't `depends_on`
-> jumbo/toolkit-proxy yet calls them). **Not the compose env** — the shared
-> `*service-urls` anchor injects every URL into ~22 services, which would make a
-> near-complete mesh. The code grep is what each service *actually* references.
+The graph is hand-maintained (edit the JSON when the code changes) — there is no
+grep-regeneration, because the grep over-counted (dead-env) and under-counted
+(missed `jumbo→akela`).
 
-The grepped graph is frozen into a committed **static map**,
-`scripts/lib/service-graph.json` (a standard adjacency representation: per
-service its `gate`, `buildable`, and `calls`), so `graph`/`resolve` are fast and
-the map is inspectable/editable. Regenerate after code changes with `stack graph
---refresh` (or `depgraph.py build`).
-
-Profile gates are **not** pruned — every service is a node tagged with its gate
-(`core` = always-on). `resolve` returns the transitive closure to wake **and the
-profile gates that closure needs** — it walks *across* gates.
+**`rw` is the load-bearing field for forking.** A forked service falling through
+to a baseline peer is safe for **R** edges, but a **W** edge *mutates baseline
+state* (creates projects/deploys, mints identities, publishes templates, consumes
+pool agents). `stack check <set>` lists the boundary edges and **flags every W
+edge** so you never silently corrupt baseline:
 
 ```
-stack graph                     # relation map (from the static map; --refresh to rebuild)
-stack resolve toolkit-proxy     # leaf: toolkit-proxy + db, gitana, jumbo, narnia, redis
-stack resolve brahmi            # orchestrator: fans out to ~most of the stack (that's real)
+$ stack check brahmi
+DISCONNECTED: in-between node(s) missing from the set —
+  jumbo   <- brahmi[W]   ⚠ WRITE (mutates baseline)
+  raksha  <- brahmi[W]   ⚠ WRITE (mutates baseline)
+  cha-ching <- brahmi[R]                         # read — safe to fall through
+  …
 ```
-
-Because edges are the true call graph, a central service (brahmi) legitimately
-resolves to most of the stack, while a leaf (toolkit-proxy) stays small — the
-closure size reflects real coupling.
-
-`fork --resolve` chains this in: seeds → closure → per node, **rebuild from
-branch if it's in the workspaces file, else run the baseline image** (the
-build/mirror split), with the needed profiles enabled automatically.
 
 ### Pre-flight connectivity (fail fast, no broken flows)
 
