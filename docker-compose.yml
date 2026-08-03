@@ -323,13 +323,13 @@ services:
   # on the minio router replaces the old minio-proxy nginx shim. See
   # CLAUDE.md's Cloudflare gotcha for the full story.
   traefik:
-    # ≥3.7 required: older builds pin docker API 1.24, which modern
+    # ≥3.6.1 required: older builds pin docker API 1.24, which modern
     # dockerd (min 1.40) rejects — the provider then loops "client
-    # version 1.24 is too old" and zero routes appear. DOCKER_API_VERSION
-    # is belt-and-braces for builds that honor it.
+    # version 1.24 is too old" and zero routes appear. 3.6.1+ auto-negotiates
+    # the API version with the daemon (traefik PR #12256), so no
+    # DOCKER_API_VERSION pin is needed — and pinning would only rot if the
+    # daemon later raised its minimum past the pinned value.
     image: traefik:v3.7
-    environment:
-      DOCKER_API_VERSION: "1.44"
     command:
       - --providers.docker=true
       - --providers.docker.exposedbydefault=false
