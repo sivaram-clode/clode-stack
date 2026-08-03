@@ -9,7 +9,8 @@ no routing layer.
 
     wfork preview --config fork.b1.yaml   # dry-run: boundary report + WRITE warnings
     wfork up      --config fork.b1.yaml   # the only mutating step (atomic)
-    wfork down    --config fork.b1.yaml   # tear down (containers + fresh DBs)
+    wfork down    --config fork.b1.yaml   # tear down one fork (containers + fresh DBs)
+    wfork prune                           # tear down ALL forks (containers + DBs + fork images)
     wfork ls
 
 Config schema:
@@ -300,6 +301,29 @@ def cmd_down(name):
     s.log(f"fork '{name}' down")
 
 
+def cmd_prune():
+    """Tear down EVERY fork: all clode.wfork containers + their fork DBs + fork images."""
+    names = {f.name[:-len(".applied.json")] for f in STATE.glob("*.applied.json")}
+    labels = s.docker("ps", "-a", "--filter", "label=clode.wfork=1",
+                      "--format", '{{.Label "clode.fork"}}', capture=True).stdout.split()
+    names.update(x for x in labels if x)
+    if not names:
+        s.log("no forks to prune")
+        return
+    for n in sorted(names):
+        cmd_down(n)  # removes containers + fork DBs + the applied spec
+    # drop fork-specific images (branch builds + fork consoles); never baseline mirrors
+    imgs = s.docker("images", "--format", "{{.Repository}}:{{.Tag}}", capture=True).stdout.split()
+    tiers = {"latest", "dev", "vm", "voice", "slim"}
+    fork_imgs = [i for i in imgs
+                 if i.startswith("clode-console-web-")
+                 or (i.startswith("clode-stack/") and i.rsplit(":", 1)[-1] in names)]
+    if fork_imgs:
+        s.docker("rmi", *fork_imgs, capture=True, check=False)
+        s.log(f"removed {len(fork_imgs)} fork image(s)")
+    s.log(f"pruned {len(names)} fork(s)")
+
+
 def cmd_ls():
     s.docker("ps", "-a", "--filter", "label=clode.wfork=1",
              "--format", 'table {{.Label "clode.fork"}}\t{{.Names}}\t{{.Status}}')
@@ -314,10 +338,13 @@ def main():
         if c == "down":
             p.add_argument("name", nargs="?", help="fork name (alternative to --config)")
     sub.add_parser("ls")
+    sub.add_parser("prune")   # tear down ALL forks
     a = ap.parse_args()
 
     if a.cmd == "ls":
         return cmd_ls()
+    if a.cmd == "prune":
+        return cmd_prune()
     if a.cmd == "down":
         name = load_config(a.config)["name"] if a.config else a.name
         return cmd_down(name or s.die("down: need --config <file> or a fork name"))

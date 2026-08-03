@@ -1,0 +1,243 @@
+"""scripts/lib/agent_sweep.py — shared agent + volume sweep helpers.
+
+Imported by cleanup.py (--agents) and wipe.py. Every "agent" container in
+this stack lives outside `docker compose`'s project graph, so `compose
+down` can't reach them and they linger on the `clode` bridge:
+
+  1. pool-manager LOCAL_MODE spawns kairo containers via the docker
+     socket. No mock labels — matched by IMAGE, and by their `kairo-`
+     NAME prefix as a fallback (a rebuild leaves them on a dangling image
+     id / an alternate tag that the image match misses).
+  2. ec2mock spawns aramb-vm containers named `i-<hex>` for RunInstances.
+     Every container carries an `aws.mock.instance-id` label; every
+     backing named volume carries `aws.mock.owned=true`. Matched by
+     LABEL — image-agnostic, so it survives an image tag change.
+
+Consumers get three functions:
+
+  agent_images()          -> returns deduped image list
+                             (ec2mock GET -> JSON -> $BENJI_IMAGE, in order).
+  sweep_agent_containers(dry)
+                          -> docker rm -f (containers-by-label U
+                             containers-by-image on the clode network).
+  sweep_agent_volumes(dry)
+                          -> docker volume rm on every volume labeled
+                             aws.mock.owned=true (ec2mock's per-instance
+                             $BENJI_HOME volumes). Pool-manager LOCAL_MODE
+                             agents don't use named volumes so nothing to
+                             collect from that side.
+
+Every function accepts an optional `dry` arg — pass "1" to print what
+WOULD run instead of doing it. Empty / "0" runs for real.
+"""
+import json
+import os
+import urllib.request
+from pathlib import Path
+
+import stacklib as s
+
+# Ports must match what compose publishes for ec2mock (see the
+# `ports:` block in docker-compose.yml — 8100 -> 8080).
+EC2MOCK_URL = os.environ.get("EC2MOCK_URL", "http://ec2mock.localhost:8080")
+
+# Path from the clode-stack root.
+KAIRO_CFG = os.environ.get("KAIRO_CFG", "data/pool-manager-svc-configs.json")
+
+# All agents attach to this docker network. Both filters scope through it
+# to avoid torching an unrelated container that happens to share a benji
+# tag.
+AGENT_NETWORK = os.environ.get("AGENT_NETWORK", "clode")
+
+# Container label ec2mock stamps on every instance it launches (mirrors
+# containerLabelInstanceID in ec2-docker-mock/internal/mock/docker.go).
+EC2MOCK_INSTANCE_LABEL = os.environ.get("EC2MOCK_INSTANCE_LABEL", "aws.mock.instance-id")
+
+# Container label ec2mock's /narnia group stamps on every service container it
+# deploys (mirrors deploy.LabelDeployed in the ec2-docker-mock deploy package).
+EC2MOCK_DEPLOYED_LABEL = os.environ.get("EC2MOCK_DEPLOYED_LABEL", "aws.mock.deployed-service")
+
+# Volume label ec2mock stamps on every named volume it creates (mirrors
+# labelValueTrue + "aws.mock.owned" in ensureVolume).
+EC2MOCK_VOLUME_LABEL = os.environ.get("EC2MOCK_VOLUME_LABEL", "aws.mock.owned=true")
+
+
+def _kairo_cfg_path() -> Path:
+    """Resolve KAIRO_CFG relative to the repo root when it isn't absolute
+    (bash callers `cd` to the repo root before sourcing; Python doesn't)."""
+    p = Path(KAIRO_CFG)
+    return p if p.is_absolute() else (s.REPO_DIR / p)
+
+
+def _dedup(lines):
+    """awk 'NF && !seen[$0]++' — drop blank lines, keep first occurrence."""
+    out = []
+    seen = set()
+    for line in lines:
+        if not line.strip():
+            continue
+        if line not in seen:
+            seen.add(line)
+            out.append(line)
+    return out
+
+
+def agent_images():
+    """Emit the deduped set of docker image refs that back every
+    agent-class container in this stack. Precedence (first hit wins,
+    but all sources are unioned because different container populations
+    come from different sources):
+
+      1. ec2mock GET /_admin/config/default-image  — the live image ec2mock
+         is currently launching (source of truth when ec2mock is up).
+      2. .configs[].settings.image in pool-manager-svc-configs.json — the
+         images pool-manager LOCAL_MODE spawns; also seeds ec2mock on boot.
+      3. $BENJI_IMAGE — up.sh --agent exports this, overrides
+         the JSON's image at seed time; kept in the union so we still match
+         containers launched under it before the JSON was resyncd.
+    """
+    lines = []
+
+    # Live ec2mock lookup — non-fatal on connection error / non-JSON body /
+    # unset value. Any failure is swallowed (mirrors curl --fail piping
+    # nothing into jq on connect failure / non-2xx / non-JSON).
+    try:
+        req = urllib.request.Request(f"{EC2MOCK_URL}/_admin/config/default-image")
+        with urllib.request.urlopen(req, timeout=2) as resp:
+            data = json.load(resp)
+        val = data.get("default_image")
+        if val:
+            lines.append(val)
+    except Exception:
+        pass
+
+    # .configs[].settings.image from the pool-manager svc-configs JSON.
+    cfg = _kairo_cfg_path()
+    if cfg.is_file():
+        try:
+            data = json.loads(cfg.read_text())
+            for c in data.get("configs", []):
+                img = (c.get("settings") or {}).get("image")
+                if img:
+                    lines.append(img)
+        except Exception:
+            pass
+
+    if os.environ.get("BENJI_IMAGE"):
+        lines.append(os.environ["BENJI_IMAGE"])
+    if os.environ.get("BROWSER_IMAGE"):
+        lines.append(os.environ["BROWSER_IMAGE"])
+
+    # Legacy + current local tags up.sh has produced — catches containers
+    # launched under an older tag scheme that is no longer the seeded
+    # default.
+    for tag in ("latest", "dev", "vm", "voice", "slim"):
+        lines.append(f"clode-stack/benji:{tag}")
+    lines.append("clode-stack/brave-head:latest")
+
+    return _dedup(lines)
+
+
+def _ps_ids(*filters):
+    """`docker ps -aq` with the given --filter args; returns id lines
+    (best-effort — a daemon error yields an empty list)."""
+    args = ["ps", "-aq"]
+    for f in filters:
+        args += ["--filter", f]
+    r = s.docker(*args, capture=True, check=False)
+    return [x for x in r.stdout.splitlines() if x.strip()]
+
+
+def _agent_container_ids(images):
+    """Print container ids that are either labeled by ec2mock OR built from
+    one of the passed images, AND attached to the clode network. The sets
+    are unioned via `sort -u` because `docker ps --filter` semantics can't
+    OR across filter TYPES (label OR ancestor) in a single call."""
+    ids = []
+
+    # Set A: containers ec2mock owns (label-based, image-agnostic).
+    ids += _ps_ids(
+        f"label={EC2MOCK_INSTANCE_LABEL}",
+        f"network={AGENT_NETWORK}",
+    )
+
+    # Set A2: services deployed via ec2mock's /narnia group (label-based,
+    # image-agnostic). Separate `docker ps` because multiple `--filter label`
+    # AND-combine; this OR-unions with set A via the final sort -u.
+    ids += _ps_ids(
+        f"label={EC2MOCK_DEPLOYED_LABEL}",
+        f"network={AGENT_NETWORK}",
+    )
+
+    # Set B: containers matching any pool-manager image (image-based).
+    # Multiple `--filter ancestor=` are OR'd by docker; the network filter
+    # AND-combines. Skip the call entirely if no images resolved.
+    if images:
+        filters = [f"network={AGENT_NETWORK}"]
+        for img in images:
+            filters.append(f"ancestor={img}")
+        ids += _ps_ids(*filters)
+
+    # Set C: pool-manager LOCAL_MODE agents matched by NAME on the clode
+    # network. Their image tag is not stable — a rebuild leaves the running
+    # container on a bare image ID (dangling `<none>`), and some agents run
+    # `sivaclode/kairo:latest`; both break the ancestor match in set B. Every
+    # pool-manager agent is named `kairo-*` (pool-manager's container-name
+    # prefix), which survives any retag, so match on that. Scoped to the clode
+    # network so a compose service never matches (those are `clode-<svc>-1`).
+    ids += _ps_ids(
+        "name=kairo-",
+        f"network={AGENT_NETWORK}",
+    )
+
+    return sorted({x for x in ids if x.strip()})
+
+
+def sweep_agent_containers(dry="0"):
+    """Remove every agent container. Prints one indented line per removed
+    container. Returns whether or not it removed anything."""
+    images = agent_images()
+
+    ids = _agent_container_ids(images)
+    if not ids:
+        return
+
+    # Show what we're about to touch — the operator gets one shot to Ctrl-C
+    # if this is scoped too broadly.
+    r = s.docker(
+        "ps", "-a",
+        "--filter", "id=" + ",".join(ids),
+        "--format", "    {{.Names}}  ({{.Image}})",
+        capture=True, check=False,
+    )
+    print(r.stdout, end="")
+
+    if str(dry) == "1":
+        print(f"  \033[2m$\033[0m docker rm -fv  # {len(ids)} container(s)")
+        return
+    # -v takes each container's ANONYMOUS volumes with it (named volumes are
+    # untouched — ec2mock's are swept by label in sweep_agent_volumes). This
+    # keeps a rebuild from orphaning per-container scratch volumes.
+    s.docker("rm", "-fv", *ids, capture=True)
+
+
+def sweep_agent_volumes(dry="0"):
+    """Remove every named volume ec2mock owns. Volume-remove is safe here
+    because sweep_agent_containers is called first by every consumer — the
+    volumes are detached by the time we get here. If a volume is still in
+    use, docker volume rm returns non-zero; suppress it (best-effort)
+    rather than aborting the wipe."""
+    r = s.docker(
+        "volume", "ls", "-q", "--filter", f"label={EC2MOCK_VOLUME_LABEL}",
+        capture=True, check=False,
+    )
+    vols = [v for v in r.stdout.splitlines() if v.strip()]
+    if not vols:
+        return
+
+    for v in vols:
+        print(f"    {v}")
+    if str(dry) == "1":
+        print(f"  \033[2m$\033[0m docker volume rm  # {len(vols)} volume(s)")
+        return
+    s.docker("volume", "rm", *vols, capture=True, check=False)
