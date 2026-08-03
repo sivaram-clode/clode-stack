@@ -20,9 +20,10 @@ import urllib.request
 import urllib.error
 from pathlib import Path
 
-REPO_DIR = Path(__file__).resolve().parents[2]             # scripts/lib/stacklib.py -> repo root
+REPO_DIR = Path(os.environ.get("CLODE_REPO_DIR")
+                or Path(__file__).resolve().parents[2]).resolve()  # scripts/lib/stacklib.py -> repo root
 STACK_DIR = Path(os.environ.get("CLODE_STACK_DIR", REPO_DIR)).resolve()
-NET = "clode"
+NET = os.environ.get("CLODE_NET", "clode")                 # the docker network forks/sweeps attach to
 
 
 def log(msg: str) -> None:
@@ -82,10 +83,12 @@ def docker(*args, **kw):
 
 
 def db_container() -> str:
-    """The baseline postgres container name."""
-    names = docker("ps", "--format", "{{.Names}}", capture=True).stdout.split()
+    """The postgres container on our network (NET). Scoping to NET keeps this correct
+    when another stack (baseline vs a test bed on a different network) runs alongside."""
+    names = docker("ps", "--filter", f"network={NET}", "--format", "{{.Names}}",
+                   capture=True, check=False).stdout.split()
     for n in names:
-        if n == "clode-db-1" or n.endswith("-db-1"):
+        if n.endswith("-db-1"):
             return n
     return "clode-db-1"
 

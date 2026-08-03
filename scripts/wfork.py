@@ -119,14 +119,14 @@ def write_env_file(env: dict) -> str:
     return path
 
 
-def run_service(cname, svc, name, image, cfg_services, envfile):
+def run_service(cname, svc, name, image, cfg_services, envfile, project):
     c = cfg_services[svc]
     cmd = c.get("command") or []
     if isinstance(cmd, str):
         cmd = [cmd]
     args = [
         "run", "-d", "--name", cname, "--network", s.NET, "--restart", "unless-stopped",
-        "--label", "com.docker.compose.project=clode", "--label", "clode.wfork=1",
+        "--label", f"com.docker.compose.project={project}", "--label", "clode.wfork=1",
         "--label", f"clode.fork={name}", "--label", f"clode.svc={svc}",
         "--label", "traefik.enable=true",
         "--label", f"traefik.http.routers.{cname}.rule=Host(`{cname}.localhost`)",
@@ -184,7 +184,7 @@ def fresh_db(svc, name, base_db):
     s.log(f"  db: fresh -> {new} (schema copied; migrations may still be needed)")
 
 
-def console_up(name, forked):
+def console_up(name, forked, project):
     cname, img = f"console-web-{name}", f"clode-console-web-{name}:latest"
     bargs = []
     for p in forked:
@@ -196,7 +196,7 @@ def console_up(name, forked):
     s.docker("build", "-f", s.REPO_DIR / "docker/console-web/Dockerfile",
              "--build-context", f"src={src}", *bargs, "-t", img, s.REPO_DIR / "docker/console-web")
     s.docker("run", "-d", "--name", cname, "--network", s.NET, "--restart", "unless-stopped",
-             "--label", "com.docker.compose.project=clode", "--label", "clode.wfork=1",
+             "--label", f"com.docker.compose.project={project}", "--label", "clode.wfork=1",
              "--label", f"clode.fork={name}", "--label", "clode.svc=console-web",
              "--label", "traefik.enable=true",
              "--label", f"traefik.http.routers.{cname}.rule=Host(`{cname}.localhost`)",
@@ -246,7 +246,8 @@ def cmd_up(cfg):
     # Include every profile so profile-gated services (toolkit-proxy=tools,
     # chil=org, …) resolve in the baseline config we read env/caps/command from.
     os.environ["COMPOSE_PROFILES"] = s.compose_profiles()
-    cfg_services = s.compose_config()["services"]     # baseline resolved env/ports/caps/command
+    base = s.compose_config()                          # baseline resolved env/ports/caps/command
+    cfg_services, project = base["services"], base["name"]
     STATE.mkdir(exist_ok=True)
 
     for svc, m in cfg["services"].items():
@@ -260,7 +261,7 @@ def cmd_up(cfg):
             s.log(f"{svc}: building {image} from '{m['branch']}'")
             branch_build(svc, m["branch"], image)
         else:
-            image = f"clode-{svc}:latest"
+            image = f"{project}-{svc}:latest"
             s.docker("image", "inspect", image, capture=True, check=False).returncode == 0 or \
                 s.die(f"{image} not built (run stack up {svc} first)")
             s.log(f"{svc}: mirror ({image})")
@@ -272,12 +273,12 @@ def cmd_up(cfg):
 
         env = build_env(svc, name, forked, m["db"], cfg_services, m["env"])
         envfile = write_env_file(env)
-        run_service(cname, svc, name, image, cfg_services, envfile)
+        run_service(cname, svc, name, image, cfg_services, envfile, project)
         os.unlink(envfile)
         s.log(f"  → http://{cname}.localhost:8080")
 
     if cfg["console"]:
-        console_up(name, cfg["console"]["fork"])
+        console_up(name, cfg["console"]["fork"], project)
 
     (STATE / f"{name}.applied.json").write_text(json.dumps(cfg, indent=2))
     print()
