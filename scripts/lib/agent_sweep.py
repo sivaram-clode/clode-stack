@@ -32,7 +32,6 @@ WOULD run instead of doing it. Empty / "0" runs for real.
 """
 import json
 import os
-import urllib.request
 from pathlib import Path
 
 import stacklib as s
@@ -101,15 +100,10 @@ def agent_images():
     # Live ec2mock lookup — non-fatal on connection error / non-JSON body /
     # unset value. Any failure is swallowed (mirrors curl --fail piping
     # nothing into jq on connect failure / non-2xx / non-JSON).
-    try:
-        req = urllib.request.Request(f"{EC2MOCK_URL}/_admin/config/default-image")
-        with urllib.request.urlopen(req, timeout=2) as resp:
-            data = json.load(resp)
-        val = data.get("default_image")
-        if val:
-            lines.append(val)
-    except Exception:
-        pass
+    data = s.get_json(f"{EC2MOCK_URL}/_admin/config/default-image", timeout=2)
+    val = data.get("default_image") if isinstance(data, dict) else None
+    if val:
+        lines.append(val)
 
     # .configs[].settings.image from the pool-manager svc-configs JSON.
     cfg = _kairo_cfg_path()
@@ -138,16 +132,6 @@ def agent_images():
     return _dedup(lines)
 
 
-def _ps_ids(*filters):
-    """`docker ps -aq` with the given --filter args; returns id lines
-    (best-effort — a daemon error yields an empty list)."""
-    args = ["ps", "-aq"]
-    for f in filters:
-        args += ["--filter", f]
-    r = s.docker(*args, capture=True, check=False)
-    return [x for x in r.stdout.splitlines() if x.strip()]
-
-
 def _agent_container_ids(images):
     """Print container ids that are either labeled by ec2mock OR built from
     one of the passed images, AND attached to the clode network. The sets
@@ -156,7 +140,7 @@ def _agent_container_ids(images):
     ids = []
 
     # Set A: containers ec2mock owns (label-based, image-agnostic).
-    ids += _ps_ids(
+    ids += s.containers(
         f"label={EC2MOCK_INSTANCE_LABEL}",
         f"network={AGENT_NETWORK}",
     )
@@ -164,7 +148,7 @@ def _agent_container_ids(images):
     # Set A2: services deployed via ec2mock's /narnia group (label-based,
     # image-agnostic). Separate `docker ps` because multiple `--filter label`
     # AND-combine; this OR-unions with set A via the final sort -u.
-    ids += _ps_ids(
+    ids += s.containers(
         f"label={EC2MOCK_DEPLOYED_LABEL}",
         f"network={AGENT_NETWORK}",
     )
@@ -176,7 +160,7 @@ def _agent_container_ids(images):
         filters = [f"network={AGENT_NETWORK}"]
         for img in images:
             filters.append(f"ancestor={img}")
-        ids += _ps_ids(*filters)
+        ids += s.containers(*filters)
 
     # Set C: pool-manager LOCAL_MODE agents matched by NAME on the clode
     # network. Their image tag is not stable — a rebuild leaves the running
@@ -185,7 +169,7 @@ def _agent_container_ids(images):
     # pool-manager agent is named `kairo-*` (pool-manager's container-name
     # prefix), which survives any retag, so match on that. Scoped to the clode
     # network so a compose service never matches (those are `clode-<svc>-1`).
-    ids += _ps_ids(
+    ids += s.containers(
         "name=kairo-",
         f"network={AGENT_NETWORK}",
     )

@@ -93,8 +93,7 @@ def main():
     PROJECT = s.compose_config()["name"]
 
     # Include every profile so `compose down` sees profile-gated services.
-    profiles = [p for p in s.compose("config", "--profiles", capture=True).stdout.splitlines() if p != ""]
-    os.environ["COMPOSE_PROFILES"] = ",".join(profiles)
+    os.environ["COMPOSE_PROFILES"] = s.compose_profiles()
 
     # ── stage 1: release the `clode` network from non-compose containers ───
     # `docker compose down` can't drop the `clode` network while
@@ -108,8 +107,7 @@ def main():
     # clode-stack/<svc>:<name> and clode-console-web-<name>) — but NOT baseline
     # mirror images (clode-<svc>:latest) or the agent tiers, which are shared.
     # Fork logical DBs (<svc>_<name>) vanish with the postgres volume in stage 2.
-    fork_ids = s.docker("ps", "-aq", "--filter", "label=clode.wfork=1",
-                        capture=True, check=False).stdout.split()
+    fork_ids = s.containers("label=clode.wfork=1")
     if fork_ids:
         imgs = s.docker("inspect", "--format", "{{.Config.Image}}", *fork_ids,
                         capture=True, check=False).stdout.split()
@@ -195,7 +193,7 @@ def main():
         "--filter", f"label=com.docker.compose.project={PROJECT}",
         capture=True, check=False,
     )
-    stragglers = [v for v in r.stdout.splitlines() if v != ""]
+    stragglers = s.lines(r)
     if stragglers:
         print(f"==> removing {PROJECT} volume stragglers:")
         for v in stragglers:

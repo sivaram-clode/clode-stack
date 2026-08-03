@@ -37,9 +37,6 @@ import os
 import shutil
 import subprocess
 import sys
-import time
-import urllib.error
-import urllib.request
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
@@ -96,23 +93,6 @@ def psql_argv(*extra):
         "psql", "-U", "postgres", "-v", "ON_ERROR_STOP=1",
         *[str(e) for e in extra],
     ]
-
-
-def psql(*extra, stdin=None, capture=False, check=True):
-    return s.run(psql_argv(*extra), stdin=stdin, capture=capture, check=check)
-
-
-def http_request(method, url, data=None, headers=None):
-    """Return (status_code, body_text). status 0 on connection failure."""
-    body = data.encode() if isinstance(data, str) else data
-    req = urllib.request.Request(url, data=body, method=method, headers=headers or {})
-    try:
-        with urllib.request.urlopen(req) as r:
-            return r.status, r.read().decode("utf-8", "replace")
-    except urllib.error.HTTPError as e:
-        return e.code, e.read().decode("utf-8", "replace")
-    except urllib.error.URLError:
-        return 0, ""
 
 
 def main():
@@ -190,13 +170,10 @@ def main():
     say("Pre-flight")
 
     def wait_healthy(name, url):
-        for _ in range(1, 61):
-            code, _body = http_request("GET", url + "/health")
-            if 200 <= code < 400:
-                ok("%s reachable at %s" % (name, url))
-                return
-            time.sleep(1)
-        warn("%s not reachable at %s after 60s — continuing anyway" % (name, url))
+        if s.wait_healthy(url + "/health"):
+            ok("%s reachable at %s" % (name, url))
+        else:
+            warn("%s not reachable at %s after 60s — continuing anyway" % (name, url))
 
     if in_scope("raksha"):
         wait_healthy("raksha", RAKSHA_URL)
@@ -214,9 +191,11 @@ def main():
     created_dbs = []
     for svc in list(SVC_DB):
         dbname = SVC_DB[svc]
-        exists = (psql(
-            "-d", "postgres", "-tAc",
-            "SELECT 1 FROM pg_database WHERE datname='%s'" % dbname,
+        exists = (s.psql(
+            "postgres", args=[
+                "-tAc",
+                "SELECT 1 FROM pg_database WHERE datname='%s'" % dbname,
+            ],
             capture=True, check=False,
         ).stdout or "")
         exists = "".join(exists.split())
@@ -225,7 +204,7 @@ def main():
         else:
             # CREATE DATABASE can't run inside a transaction; the double-quoted
             # identifier is safe for dashes (pool-manager) and underscores alike.
-            psql("-d", "postgres", "-c", 'CREATE DATABASE "%s"' % dbname)
+            s.psql("postgres", args=["-c", 'CREATE DATABASE "%s"' % dbname])
             ok("%s: created (%s)" % (dbname, svc))
             created_dbs.append(dbname)
 
@@ -257,7 +236,7 @@ def main():
     # and `org_members` records the ownership (UNIQUE WHERE role='owner').
     if in_scope("raksha"):
         say("raksha: admin user + org + default service account")
-        psql("-d", "raksha", "-v", "owner_id=%s" % ADMIN_USER_ID, stdin="""INSERT INTO users (id, email, name)
+        s.psql("raksha", args=["-v", "owner_id=%s" % ADMIN_USER_ID], sql="""INSERT INTO users (id, email, name)
 VALUES (:'owner_id', 'admin@local', 'Admin / Pool Owner')
 ON CONFLICT (id) DO NOTHING;
 
@@ -285,7 +264,7 @@ ON CONFLICT DO NOTHING;
         # user exists in `users` at boot — no row = fatal crashloop, regardless
         # of whether the notify service ever comes up.
         say("raksha: raksha-notify user + org + default service account")
-        psql("-d", "raksha", "-v", "owner_id=%s" % NOTIFY_ADMIN_ORG_ID, stdin="""INSERT INTO users (id, email, name)
+        s.psql("raksha", args=["-v", "owner_id=%s" % NOTIFY_ADMIN_ORG_ID], sql="""INSERT INTO users (id, email, name)
 VALUES (:'owner_id', 'raksha-notify@local', 'Raksha Notify')
 ON CONFLICT (id) DO NOTHING;
 
@@ -309,7 +288,7 @@ ON CONFLICT DO NOTHING;
         # the user row exists (raksha/cmd/main.go:294) — no row = crashloop.
         # Seed unconditionally, since env vars are always set on raksha.
         say("raksha: raksha-chaching user + org + default service account")
-        psql("-d", "raksha", "-v", "owner_id=%s" % CHACHING_ADMIN_ORG_ID, stdin="""INSERT INTO users (id, email, name)
+        s.psql("raksha", args=["-v", "owner_id=%s" % CHACHING_ADMIN_ORG_ID], sql="""INSERT INTO users (id, email, name)
 VALUES (:'owner_id', 'raksha-chaching@local', 'Raksha ChaChing')
 ON CONFLICT (id) DO NOTHING;
 
@@ -344,7 +323,7 @@ ON CONFLICT DO NOTHING;
         # redirect_uri points at intervix-web's dev server (:3001) at the
         # /auth/callback route the SPA's AppRouter mounts.
         say("raksha: intervix OAuth client (client_id=intervix-local → http://localhost:3001/auth/callback)")
-        psql("-d", "raksha", stdin="""INSERT INTO oauth_clients (
+        s.psql("raksha", sql="""INSERT INTO oauth_clients (
   client_id,
   client_name,
   redirect_uris,
@@ -393,7 +372,7 @@ ON CONFLICT (client_id) DO UPDATE
     if in_scope("cha-ching"):
         say("cha-ching: tier defaults + credit catalogue")
         cha_sql = (s.REPO_DIR / "seeds" / "cha-ching-seed.sql").read_text()
-        psql("-d", "chaching", stdin=cha_sql, capture=True)
+        s.psql("chaching", sql=cha_sql, capture=True)
         ok("cha-ching reference data seeded")
     else:
         skip("cha-ching not in scope — skipping tier-defaults seed")
@@ -406,12 +385,14 @@ ON CONFLICT (client_id) DO UPDATE
     # is just a UUID with no FK). Depends on raksha having seeded the admin.
     if in_scope("jumbo") and in_scope("raksha"):
         say("jumbo: pool project + application + draft canvas")
-        psql(
-            "-d", "jumbo",
-            "-v", "owner_id=%s" % ADMIN_USER_ID,
-            "-v", "project_id=%s" % POOL_PROJECT_ID,
-            "-v", "application_id=%s" % POOL_APPLICATION_ID,
-            stdin="""INSERT INTO projects (id, org_id, name, slug, created_by_member_id, is_default)
+        s.psql(
+            "jumbo",
+            args=[
+                "-v", "owner_id=%s" % ADMIN_USER_ID,
+                "-v", "project_id=%s" % POOL_PROJECT_ID,
+                "-v", "application_id=%s" % POOL_APPLICATION_ID,
+            ],
+            sql="""INSERT INTO projects (id, org_id, name, slug, created_by_member_id, is_default)
 VALUES (:'project_id', :'owner_id', 'Pool Project', 'pool-project', :'owner_id', true)
 ON CONFLICT (id) DO NOTHING;
 
@@ -472,16 +453,18 @@ WHERE NOT EXISTS (
             img_val = cfg["settings"].get("image")
             img_log = "null" if img_val is None else str(img_val)
             say("pool-manager: %s svc_configs (image=%s, hot=%s, cold=%s, max=%s)" % (st, img_log, hot, cold, maxc))
-            psql(
-                "-d", "pool-manager",
-                "-v", "st=%s" % st,
-                "-v", "settings=%s" % settings_json,
-                "-v", "vars_json=%s" % vars_json,
-                "-v", "hot=%s" % hot,
-                "-v", "cold=%s" % cold,
-                "-v", "maxc=%s" % maxc,
-                "-v", "ena=%s" % ena,
-                stdin="""INSERT INTO svc_configs (service_type, settings, vars, config_hash, hot_count, cold_count, max_concurrent_deployments, enabled)
+            s.psql(
+                "pool-manager",
+                args=[
+                    "-v", "st=%s" % st,
+                    "-v", "settings=%s" % settings_json,
+                    "-v", "vars_json=%s" % vars_json,
+                    "-v", "hot=%s" % hot,
+                    "-v", "cold=%s" % cold,
+                    "-v", "maxc=%s" % maxc,
+                    "-v", "ena=%s" % ena,
+                ],
+                sql="""INSERT INTO svc_configs (service_type, settings, vars, config_hash, hot_count, cold_count, max_concurrent_deployments, enabled)
 VALUES (
   :'st',
   :'settings'::jsonb,
@@ -520,10 +503,11 @@ ON CONFLICT (service_type) DO UPDATE
             warn("no kairo image found in %s — ec2mock default_image not seeded" % KAIRO_JSON)
         else:
             say("ec2mock: pushing default_image=%s" % KAIRO_IMG)
-            http, body = http_request(
+            http, body = s.http(
                 "PUT", "%s/_admin/config/default-image" % EC2MOCK_URL,
                 data=json.dumps({"image": KAIRO_IMG}),
                 headers={"Content-Type": "application/json"},
+                timeout=None,
             )
             if http in (200, 204):
                 ok("ec2mock default_image=%s" % KAIRO_IMG)
@@ -538,7 +522,7 @@ ON CONFLICT (service_type) DO UPDATE
     # raksha there's no auth path here.
     if in_scope("skills-registry") and in_scope("raksha"):
         say("skills-registry: minting admin JWT from raksha")
-        _code, _body = http_request("GET", "%s/generate-dev-jwt-access-token?sub=%s" % (RAKSHA_URL, ADMIN_USER_ID))
+        _code, _body = s.http("GET", "%s/generate-dev-jwt-access-token?sub=%s" % (RAKSHA_URL, ADMIN_USER_ID), timeout=None)
         try:
             ADMIN_JWT = json.loads(_body)["OK"]["Jwt"]
         except (ValueError, KeyError, TypeError):
@@ -615,13 +599,14 @@ ON CONFLICT (service_type) DO UPDATE
             for i in range(0, total):
                 slug = templates[i]["slug"]
                 payload = json.dumps(templates[i])
-                http, body = http_request(
+                http, body = s.http(
                     "POST", "%s/api/v1/workflow-templates" % SKILLS_URL,
                     data=payload,
                     headers={
                         "Authorization": "Bearer %s" % ADMIN_JWT,
                         "Content-Type": "application/json",
                     },
+                    timeout=None,
                 )
                 if http in (201, 200):
                     ok("%s: created" % slug)

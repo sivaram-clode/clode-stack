@@ -16,7 +16,6 @@ import os
 import sys
 import signal
 import subprocess
-from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
@@ -27,7 +26,7 @@ def main():
     os.chdir(s.REPO_DIR)  # cd "$(dirname "$0")/.."
 
     LOGS_DIR = "logs/service"
-    TS = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    TS = s.utc_stamp()
     PID_FILE = f"{LOGS_DIR}/.tailer-pids"
 
     os.makedirs(LOGS_DIR, exist_ok=True)
@@ -50,12 +49,7 @@ def main():
     if len(args) > 0:
         services = args
     else:
-        out = s.run(
-            ["docker", "compose",
-             "-f", "docker-compose.yml", "-f", "docker-compose.cache.yml",
-             "config", "--services"],
-            capture=True,
-        ).stdout
+        out = s.compose_bare("config", "--services", capture=True).stdout
         services = out.split()
 
     count = 0

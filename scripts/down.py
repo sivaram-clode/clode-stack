@@ -36,10 +36,7 @@ def main():
 
     # Include every profile so services tied to `profiles: [...]` (deploy, inbox, …)
     # get stopped/removed too — `docker compose down` ignores them otherwise.
-    profiles_out = s.run(
-        ["docker", "compose", "config", "--profiles"], capture=True
-    ).stdout
-    compose_profiles = ",".join(profiles_out.splitlines())
+    compose_profiles = s.compose_profiles()
 
     # Reap any per-service log tailers started by up.sh.
     pid_file = Path("logs/service/.tailer-pids")
@@ -81,8 +78,8 @@ def main():
         "docker compose down --remove-orphans   "
         "(preserves volumes — use `./stack.sh wipe` to drop)"
     )
-    s.docker(
-        "compose", "down", "--remove-orphans",
+    s.compose_bare(
+        "down", "--remove-orphans",
         env={"COMPOSE_PROFILES": compose_profiles},
     )
 

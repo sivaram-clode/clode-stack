@@ -123,13 +123,6 @@ def run_compose(display, compose_args):
         s.compose(*compose_args, capture=True)
 
 
-def psql(*extra, **kw):
-    return s.compose(
-        "exec", "-T", "-e", "PGPASSWORD=postgres", "db",
-        "psql", "-U", "postgres", "-v", "ON_ERROR_STOP=1", *extra, **kw,
-    )
-
-
 # Enumerate every per-service DB from postgres at runtime. Excludes
 # template DBs and the bootstrap `postgres` DB. Sourced fresh on every
 # run so a new service added to init-multiple-dbs.sql / seed.sh shows up
@@ -279,7 +272,7 @@ def main():
             if DRY_RUN:
                 print(f'  \033[2m$\033[0m psql -d {db} -c "<TRUNCATE all non-migration tables CASCADE>"')
                 continue
-            r = psql("-d", db, "-c", truncate_sql, capture=True, check=False)
+            r = s.psql(db, args=["-c", truncate_sql], capture=True, check=False)
             if r.returncode == 0:
                 ok(f"{db}: truncated")
             else:
@@ -295,7 +288,7 @@ def main():
         if "raksha" in dbs and not DRY_RUN:
             seed_path = s.REPO_DIR / "seeds" / "raksha-seed.sql"
             try:
-                rc = psql("-d", "raksha", stdin=seed_path.read_text(), capture=True, check=False).returncode
+                rc = s.psql("raksha", sql=seed_path.read_text(), capture=True, check=False).returncode
             except OSError:
                 rc = 1
             if rc == 0:
@@ -312,7 +305,7 @@ def main():
         if "chaching" in dbs and not DRY_RUN:
             seed_path = s.REPO_DIR / "seeds" / "cha-ching-seed.sql"
             try:
-                rc = psql("-d", "chaching", stdin=seed_path.read_text(), capture=True, check=False).returncode
+                rc = s.psql("chaching", sql=seed_path.read_text(), capture=True, check=False).returncode
             except OSError:
                 rc = 1
             if rc == 0:
