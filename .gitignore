@@ -18,3 +18,7 @@ docker-compose.cache.yml
 
 # never commit console-web env files (URLs live as Dockerfile ARG defaults)
 docker/console-web/*.env
+
+# python bytecode
+__pycache__/
+*.pyc
