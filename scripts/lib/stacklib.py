@@ -12,7 +12,12 @@ Two directories matter:
 import os
 import sys
 import json
+import time
+import ssl
+import datetime
 import subprocess
+import urllib.request
+import urllib.error
 from pathlib import Path
 
 REPO_DIR = Path(__file__).resolve().parents[2]             # scripts/lib/stacklib.py -> repo root
@@ -83,3 +88,95 @@ def db_container() -> str:
         if n == "clode-db-1" or n.endswith("-db-1"):
             return n
     return "clode-db-1"
+
+
+# ── HTTP (replaces curl) ──────────────────────────────────────────────────────
+def http(method, url, *, data=None, headers=None, timeout=5, insecure=True):
+    """Minimal request. Returns (status, body_text). Never raises on HTTP/network
+    errors — status 0 means the request didn't complete (like `curl --fail` failing)."""
+    if isinstance(data, str):
+        data = data.encode()
+    req = urllib.request.Request(url, data=data, method=method, headers=headers or {})
+    ctx = ssl._create_unverified_context() if insecure else None
+    try:
+        with urllib.request.urlopen(req, timeout=timeout, context=ctx) as r:
+            return r.status, r.read().decode(errors="replace")
+    except urllib.error.HTTPError as e:
+        return e.code, e.read().decode(errors="replace")
+    except Exception:
+        return 0, ""
+
+
+def get_json(url, **kw):
+    """GET and parse JSON, or None on non-2xx / empty / parse error."""
+    status, body = http("GET", url, **kw)
+    if 200 <= status < 300 and body:
+        try:
+            return json.loads(body)
+        except ValueError:
+            return None
+    return None
+
+
+def wait_healthy(url, *, tries=60, delay=1.0, ok=lambda s: 200 <= s < 400) -> bool:
+    """Poll url until healthy (default 2xx/3xx, like `curl -sf`); True if it came up."""
+    for _ in range(tries):
+        status, _b = http("GET", url)
+        if ok(status):
+            return True
+        time.sleep(delay)
+    return False
+
+
+# ── postgres (replaces the `docker exec … psql` boilerplate) ──────────────────
+def psql(dbname, sql=None, *, args=None, capture=False, check=True):
+    """Run SQL (via stdin) in the baseline postgres. ON_ERROR_STOP=1, PGPASSWORD set."""
+    cmd = ["exec", "-i", "-e", "PGPASSWORD=postgres", db_container(),
+           "psql", "-U", "postgres", "-v", "ON_ERROR_STOP=1", "-d", dbname]
+    if args:
+        cmd += args
+    return docker(*cmd, stdin=sql, capture=capture, check=check)
+
+
+def db_exists(dbname) -> bool:
+    out = psql("postgres", f"SELECT 1 FROM pg_database WHERE datname='{dbname}'",
+               capture=True, check=False).stdout
+    return "1" in out
+
+
+# ── docker helpers ────────────────────────────────────────────────────────────
+def containers(*filters, all=True):
+    """Container IDs matching --filter args (ids, not names)."""
+    args = ["ps", "-aq" if all else "-q"]
+    for f in filters:
+        args += ["--filter", f]
+    return docker(*args, capture=True, check=False).stdout.split()
+
+
+def image_exists(image) -> bool:
+    return docker("image", "inspect", image, capture=True, check=False).returncode == 0
+
+
+def lines(cp):
+    """Non-empty stripped lines of a captured CompletedProcess's stdout."""
+    return [ln for ln in cp.stdout.splitlines() if ln.strip()]
+
+
+# ── compose helpers ───────────────────────────────────────────────────────────
+def compose_bare(*args, **kw):
+    """Base compose only — NO cache/limits overlays — but with --project-directory so
+    sibling paths (../<svc>, .env) still resolve. Use where the overlays would change
+    which profiles/services are seen (down/tail-logs discovery, config --profiles)."""
+    return run(["docker", "compose", "--project-directory", STACK_DIR,
+                "-f", REPO_DIR / "docker-compose.yml", *args], **kw)
+
+
+def compose_profiles() -> str:
+    """All defined profiles as a CSV (for COMPOSE_PROFILES=… to reach every profile)."""
+    out = compose_bare("config", "--profiles", capture=True, check=False).stdout
+    return ",".join(out.split())
+
+
+def utc_stamp() -> str:
+    """UTC filename stamp, e.g. 20260803T061500Z."""
+    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
