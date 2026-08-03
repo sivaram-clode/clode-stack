@@ -190,44 +190,41 @@ volume, no source bind-mount.
 
 ---
 
-## Phase 2 — within-network fork (`wfork`, first increment shipped)
+## The model: `wfork` — within-network, config-driven
 
-Instead of cloning the whole compose, run a single forked service **on the
-existing `clode` network** alongside baseline:
+A fork = one container `<svc>-<name>` per changed service, on the **existing
+`clode` network**, reached at `http://<svc>-<name>.localhost:8080` via baseline
+traefik. It's declared in **one reviewable YAML** and applied atomically — there
+is **no per-service invocation** (the config is the single source of truth, so
+what runs is exactly what the file says; no interleaved build/up commands).
 
+```yaml
+# fork.b1.yaml
+name: b1
+services:
+  brahmi:        { branch: feat/x, db: reuse }   # branch → build clode-stack/brahmi:b1
+  aramb-gateway: { mirror: true }                # baseline image, run as aramb-gateway-b1
+console: true                                    # build console-b1 → forked backends
 ```
-stack wfork <svc> --name <n> [--image <img>]          # run <svc>-<n> (default image: baseline)
-stack wfork console-web --name <n> --fork <svc,svc>   # fork console: rebuild with those backends → -<n>
-stack wfork-down <svc>-<n>
-stack wfork-ls
+```
+stack wfork preview --config fork.b1.yaml   # dry-run: boundary report + ⚠WRITE warnings (review this)
+stack wfork up      --config fork.b1.yaml   # the ONLY mutating step (atomic)
+stack wfork down    --config fork.b1.yaml   # tear down (containers + fresh DBs)
+stack wfork ls
 ```
 
-**console-web forks by build-time URL override — no routing.** `console-web` bakes
-its backend URLs at build, so a fork console is a rebuild where the `--fork`'d
-services' `VITE_*` URLs are overridden to `<svc>-<n>.localhost` and everything
-else stays baseline. Served at `console-web-<n>.localhost:8080`. The routes are
-frozen into that bundle (open devtools and they're literally the fork's) — the
-Origin/source-IP routing layer is only for service-to-service, not the browser.
+**How `up` wires each service** (all from `docker compose config` — no routing layer):
+- **image**: `branch:` → build `clode-stack/<svc>:<name>` from the worktree; `mirror: true` → baseline image (`clode-<svc>:latest`).
+- **env**: lifted from baseline, then the **host token of every forked peer (and self) is rewritten `<peer>` → `<peer>-<name>`** — so `aramb-gateway-b1` gets `BRAHMI_URL=http://brahmi-b1:9000`, `brahmi-b1` gets `CLUSTER_GRPC_ADDR=brahmi-b1:9500`; unlisted peers fall through to baseline by DNS. The rewrite requires a trailing `:port`/`/path`, so `DB_NAME=brahmi` is never corrupted.
+- **command + resource caps** lifted too (brahmi needs `serve`; caps from `docker-compose.limits.yml`).
+- **db**: `reuse` (default) keeps the baseline DB; `fresh` makes `<svc>_<name>` (schema copied via `pg_dump -s`, not `TEMPLATE` — which fails against a live baseline).
+- **console** (`console: true`): a static console-web build with the forked backends' `VITE_*` baked → `console-web-<name>.localhost:8080`. Build-time override, no routing.
 
-`<svc>-<n>` joins the `clode` network, is routed by the baseline traefik at
-`http://<svc>-<n>.localhost:8080`, and inherits the baseline service's env, port,
-command and resource caps (lifted from `docker compose config`). Every unchanged
-peer it calls resolves by normal DNS to the **baseline** instance — it **falls
-through to baseline** for everything you didn't fork. So one forked service costs
-**one container**, no mirrors.
+**`preview` is the reason set** — it reads the verified graph and prints, before anything runs: what routes to the fork (`aramb-gateway → brahmi ✓`), every **`⚠ WRITE mutates BASELINE`** edge (a forked brahmi still write-calls baseline jumbo/raksha/… unless you fork them too), and baseline callers that won't reach the fork. You validate the spec against consequences, then `up`.
 
-Verified: `wfork raksha --name t1` → `raksha-t1.localhost:8080` serves (401, same
-as baseline), on the `clode` net, capped at 512 MiB/1 cpu, talking to baseline
-db/redis; baseline `raksha.localhost` untouched.
+Verified: `fork.t.yaml` (brahmi + aramb-gateway mirror) → both Up on `clode`, `brahmi-t.localhost` health 200, `aramb-gateway-t` correctly rewritten to `brahmi-t`, `DB_NAME` preserved on reuse, `down` clean.
 
-**Scope today:** a *single* forked service against an otherwise-baseline stack
-(fall-through). Two things still to come: **(a)** build from a feature-branch
-worktree (reuse the `up` build flow to tag `clode-stack/<svc>:<branch>`, then run
-that image); **(b)** the **origin router** below, needed when forked services must
-call *each other* (a chain) rather than fall through to baseline; and per-branch
-logical DB so a schema-changing fork doesn't share baseline's DB.
-
-## Phase 2 — the origin-aware router (designed, not built)
+## Superseded: the origin-aware router (NOT built — env override replaces it)
 
 The lean end of the dial: one shared baseline; a clone runs **only the changed
 subtree** and everything else falls through to baseline, decided per request by

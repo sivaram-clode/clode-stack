@@ -46,9 +46,7 @@ case "$cmd" in
   fork)        exec scripts/fork.sh up   "$@" ;;
   fork-down)   exec scripts/fork.sh down "$@" ;;
   fork-ls)     exec scripts/fork.sh ls   "$@" ;;
-  wfork)       exec scripts/wfork.sh up   "$@" ;;
-  wfork-down)  exec scripts/wfork.sh down "$@" ;;
-  wfork-ls)    exec scripts/wfork.sh ls   "$@" ;;
+  wfork)       exec scripts/wfork.sh      "$@" ;;   # preview|up|down|ls, all --config driven
   graph)       exec scripts/lib/depgraph.py graph   "$@" ;;
   resolve)     exec scripts/lib/depgraph.py resolve "$@" ;;
   check)       exec scripts/lib/depgraph.py check   "$@" ;;
