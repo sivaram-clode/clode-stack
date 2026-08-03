@@ -9,13 +9,11 @@
 # Subcommands:
 #   up [--public] [svc...] build + start (whole stack or a subset) + seed;
 #                          --public adds the cloudflared edge (see up.sh)
-#   fork <name> --port <p> [--workspaces <f>] [svc...]
-#                          start an isolated feature-branch CLONE of the stack
-#                          (own project + network + traefik host port); listed
-#                          services build from their branch, rest reuse baseline
-#                          images. Reached at <svc>.localhost:<p>. See fork.sh
-#   fork-down <name>      stop + drop a clone (its volumes/network too)
-#   fork-ls               list running clones + their traefik ports
+#   wfork preview|up|down|ls --config fork.<name>.yaml
+#                          within-network feature-branch fork, driven by one YAML
+#                          config: runs <svc>-<name> on the clode network at
+#                          <svc>-<name>.localhost:8080, peers env-rewritten to the
+#                          fork, DB reuse|fresh. See scripts/wfork.py
 #   graph                 print the service relation map (A -> B = A calls B)
 #   resolve <svc...>|--workspace <f>   wake-closure + connecting/in-between nodes
 #   check <svc...>        pre-flight: is the set dependency-closed? (names dropped nodes)
@@ -43,10 +41,7 @@ shift || true
 
 case "$cmd" in
   up)          exec scripts/up.sh       "$@" ;;
-  fork)        exec scripts/fork.sh up   "$@" ;;
-  fork-down)   exec scripts/fork.sh down "$@" ;;
-  fork-ls)     exec scripts/fork.sh ls   "$@" ;;
-  wfork)       exec scripts/wfork.sh      "$@" ;;   # preview|up|down|ls, all --config driven
+  wfork)       exec python3 scripts/wfork.py "$@" ;;   # preview|up|down|ls, all --config driven
   graph)       exec scripts/lib/depgraph.py graph   "$@" ;;
   resolve)     exec scripts/lib/depgraph.py resolve "$@" ;;
   check)       exec scripts/lib/depgraph.py check   "$@" ;;
