@@ -162,8 +162,8 @@ def branch_build(svc, branch, image):
     overlay = tempfile.NamedTemporaryFile("w", suffix=".yml", delete=False)
     overlay.write(f"services:\n  {svc}:\n    image: {image}\n")
     overlay.close()
-    s.run([s.STACK_DIR / "scripts" / "gen-build-cache.sh"],
-          env={var: dir_}, cwd=s.STACK_DIR, check=False)
+    s.run([sys.executable, s.REPO_DIR / "scripts" / "gen-build-cache.py"],
+          env={var: dir_}, check=False)
     s.compose("-f", overlay.name, "build", svc, env={var: dir_})
     os.unlink(overlay.name)
 
@@ -243,6 +243,9 @@ def cmd_up(cfg):
     name, forked = cfg["name"], list(cfg["services"])
     if not re.match(r"^[a-z0-9][a-z0-9-]*$", name):
         s.die("name must be [a-z0-9-]")
+    # Include every profile so profile-gated services (toolkit-proxy=tools,
+    # chil=org, …) resolve in the baseline config we read env/caps/command from.
+    os.environ["COMPOSE_PROFILES"] = s.compose_profiles()
     cfg_services = s.compose_config()["services"]     # baseline resolved env/ports/caps/command
     STATE.mkdir(exist_ok=True)
 
@@ -291,6 +294,7 @@ def cmd_down(name):
         cfg = json.loads(applied.read_text())
         fresh = [svc for svc, m in cfg["services"].items() if m["db"] == "fresh"]
         if fresh:
+            os.environ["COMPOSE_PROFILES"] = s.compose_profiles()
             dbc, services = s.db_container(), s.compose_config()["services"]
             for svc in fresh:
                 base_db = (services.get(svc, {}).get("environment") or {}).get("DB_NAME")
