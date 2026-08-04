@@ -8,6 +8,7 @@
 //	baghira    → /baghira/*     pod-status (replicas)
 //	composio   → /composio/*    Postgres-backed Composio API mock
 //	oauth-mock → /oauth-mock/*  Google/GitHub authorize/token/userinfo + consent
+//	db         → /db            bearer-gated MCP server querying the datastores
 //
 // Every group is native Fiber, exposing one Register(fiber.Router); this file
 // mounts each with a single line.
@@ -22,6 +23,7 @@ import (
 	"github.com/sivaram-clode/mock-services/internal/mock/aws"
 	"github.com/sivaram-clode/mock-services/internal/mock/baghira"
 	"github.com/sivaram-clode/mock-services/internal/mock/composio"
+	"github.com/sivaram-clode/mock-services/internal/mock/dbquery"
 	"github.com/sivaram-clode/mock-services/internal/mock/narnia"
 	"github.com/sivaram-clode/mock-services/internal/mock/oauthmock"
 )
@@ -59,6 +61,12 @@ func New(awsMock *aws.Mock, nh *narnia.Handler, bh *baghira.Handler) *fiber.App 
 	// oauth-mock group — Google/GitHub authorize/token/userinfo + the consent
 	// screen (Fiber view engine). raksha points GOOGLE_OAUTH_BASE_URL here.
 	oauthmock.Register(app.Group("/oauth-mock", scoped("oauth-mock")))
+
+	// db group — a bearer-gated MCP server (streamable-HTTP) that runs queries
+	// against the stack's datastores (postgres/redis/databend). Unlike every
+	// other group it bridges a net/http MCP handler through fiber's adaptor; the
+	// exception is contained to this one third-party handler (see the package).
+	dbquery.New().Register(app.Group("/db", scoped("db")))
 
 	return app
 }
