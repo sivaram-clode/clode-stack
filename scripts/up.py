@@ -105,7 +105,10 @@ def ensure_minio_buckets():
     script = ("set -e\n"
               "mc alias set local http://minio:9000 minioadmin minioadmin\n"
               f"{mk}\n{pub}\n")
-    s.docker("run", "--rm", "--network", s.NET, "minio/mc:latest", "sh", "-c", script)
+    # minio/mc's ENTRYPOINT is `mc`, so override it to sh to run the script
+    # (else `sh` is parsed as an mc subcommand).
+    s.docker("run", "--rm", "--network", s.NET, "--entrypoint", "sh",
+             "minio/mc:latest", "-c", script)
 
 
 def parse_args(argv):
