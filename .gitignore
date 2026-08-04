@@ -9,6 +9,17 @@ keys/
 # Rolling per-service container logs — runtime output, not source.
 logs/
 
-# BuildKit cache-mount overlay — regenerated on every `stack up` by
-# scripts/gen-build-cache.sh. Generated artifact, not source.
+# Generated compose overlays — regenerated on every `stack up` by
+# scripts/gen-build-cache.py. Generated artifacts, not source.
 docker-compose.cache.yml
+docker-compose.images.yml
+
+# generated per-clone compose overlays (stack fork)
+.forks/
+
+# never commit console-web env files (URLs live as Dockerfile ARG defaults)
+docker/console-web/*.env
+
+# python bytecode
+__pycache__/
+*.pyc

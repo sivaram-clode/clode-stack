@@ -30,9 +30,9 @@ callbacks (gitana), Composio callbacks (toolkit-proxy), external MCP
 clients, shareable louie tunnel URLs. up.sh prints the applicable
 warnings per running service in local mode.
 
-Services never CF-exposed (ec2mock, ikki, minio-console, narnia, the
+Services never CF-exposed (mock-services, ikki, minio-console, narnia, the
 traefik dashboard) carry a `.localhost`-only router rule — do NOT add
-srclode rules to them; ec2mock's admin API is unauthenticated.
+srclode rules to them; mock-services's admin API is unauthenticated.
 
 ## Layout
 
@@ -81,20 +81,22 @@ max 6).
 ## Automated UI testing — oauth-mock lets a browser sign in
 
 Real Google/GitHub consent screens can't be driven by an automated (CDP)
-browser, so raksha's OAuth is pointed at the local **oauth-mock** service
-(`docker/oauth-mock/`, `.localhost`-only, never CF-exposed). It renders a plain
-HTML form standing in for the provider consent screen: enter **any email**,
-Approve, and raksha completes a real sign-in and creates a **real user** — so a
-headless agent can log in and exercise the app end to end.
+browser, so raksha's OAuth is pointed at the **`/oauth-mock` group** of
+mock-services (`docker/mock-services/internal/mock/oauthmock/`, `.localhost`-only,
+never CF-exposed). It renders a plain HTML form standing in for the provider
+consent screen: enter **any email**, Approve, and raksha completes a real
+sign-in and creates a **real user** — so a headless agent can log in and
+exercise the app end to end.
 
 - **Wiring:** the raksha block sets `GOOGLE_OAUTH_BASE_URL:
-  http://oauth-mock.localhost:8080`. One base covers all three endpoints
-  (`{base}/o/oauth2/auth`, `/token`, `/oauth2/v2/userinfo`); the alias resolves
-  from both the browser and the raksha container. The mock ignores client creds,
-  so the real `GOOGLE_CLIENT_ID` from `../raksha/.env` is reused unchanged. Unset
-  the var (comment it out) to fall back to real Google. GitHub is also served by
-  the mock, but `GITHUB_OAUTH_BASE_URL` is **not** wired yet — the GitHub button
-  still hits real github.com.
+  http://mock-services.localhost:8080/oauth-mock`. One base covers all three
+  endpoints (`{base}/o/oauth2/auth`, `/token`, `/oauth2/v2/userinfo` — raksha
+  concatenates onto the base, so the `/oauth-mock` path prefix carries through);
+  the alias resolves from both the browser and the raksha container. The mock
+  ignores client creds, so the real `GOOGLE_CLIENT_ID` from `../raksha/.env` is
+  reused unchanged. Unset the var (comment it out) to fall back to real Google.
+  GitHub is also served by the group, but raksha has no `GITHUB_OAUTH_BASE_URL`
+  override — the GitHub button still hits real github.com.
 - **Identity is derived from the email**, deterministically: `bob.smith@x.io`
   → name "Bob Smith", stable id. Same email = same user (returning-user path);
   a fresh email = a new signup. `DEFAULT_EMAIL` (compose) prefills the field.
@@ -171,26 +173,31 @@ against its own DB; no separate registration step.
   worktree lacks it — Vite still exposes the `VITE_*` vars from the container
   env). The bind-mount source honors `CONSOLE_WEB_DIR` from `workspaces.yaml`
   like every other service.
-- **`minio-setup` is a one-shot init container.** `restart: "no"`; creates
-  the `databend` and `brahmi-attachments` buckets then exits. `compose ps`
-  shows `Exited (0)` — that's healthy. databend's `depends_on` uses
-  `service_completed_successfully` against it.
+- **minio buckets are created by `up.py`, not a compose container.**
+  `scripts/up.py`'s `ensure_minio_buckets()` brings minio up and creates the
+  buckets (`databend`, `brahmi-attachments`, `ikki-session-contexts`,
+  `intervix-recordings`, `vova-audio` + the databend public policy) via a
+  throwaway `mc` run **before** the services that need them at boot start —
+  nothing lingers as `Exited(0)`, and the bucket list/policies live in code
+  (`MINIO_BUCKETS`), easy to extend. databend/brahmi/intervix/vova/ikki gate on
+  `minio: service_healthy` directly. (`stack seed` alone does NOT recreate
+  buckets — that's an `up`-time concern; a `cleanup`+`up` restores them.)
 - **One redis, two logical DBs.** mang-proxy hard-fails on empty
   `REDIS_PASSWORD`, so redis runs with `--requirepass clode-redis-local`.
   mang-proxy uses DB 1; raksha + brahmi use DB 0 — keeps
   `cleanup --redis` independent of `cleanup --redis-mang`.
 - **Agent + service containers live outside compose.** All are created by
-  ec2mock (the unified deployer), which owns three container populations on the
+  mock-services (the unified deployer), which owns three container populations on the
   `clode` bridge: (a) aramb-vm instances named `i-<hex>` from the `aws` group's
   RunInstances, labeled `aws.mock.instance-id` + a named volume labeled
   `aws.mock.owned=true`; (b) services deployed by the `/narnia` group (agent
   pool warm, brahmi scale, normal services — pool-manager runs `LOCAL_MODE=false`
-  so it deploys via jumbo→ec2mock rather than `docker run`ing itself), named by
+  so it deploys via jumbo→mock-services rather than `docker run`ing itself), named by
   slug and labeled `aws.mock.service-id` + `aws.mock.deployed-service`; (c) any
   legacy pool-manager `LOCAL_MODE=true` `kairo-*` containers. Compose can't see
   any of them. `scripts/lib/agent-sweep.sh` centralises the sweep — cleanup.sh's
   `--agents` and wipe.sh both call through it (containers by label ∪ image ∩
-  `network=clode`; volumes by label). Image resolution unions ec2mock's
+  `network=clode`; volumes by label). Image resolution unions mock-services's
   `GET /_admin/config/default-image`, `data/pool-manager-svc-configs.json`
   (every `.configs[].settings.image`, including the `aramb-browser` row),
   `$BENJI_IMAGE` / `$BROWSER_IMAGE`, and the static local tier tags

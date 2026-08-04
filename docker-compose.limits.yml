@@ -1,0 +1,60 @@
+# Per-service resource CEILINGS (mem_limit + cpus) for the baseline stack.
+#
+# These are caps to stop a single runaway container (e.g. the usageq hot-loop
+# that once filled the disk) from starving the host — NOT tight packing. Normal
+# usage sits far below these; Go services idle at 6–31 MiB. Applied by
+# scripts/up.sh on every bring-up and inherited by `stack fork`. Tune here; set
+# NO_LIMITS=1 to skip (e.g. `NO_LIMITS=1 ./stack.sh up`).
+#
+# top-level mem_limit + cpus are used (not deploy.resources) — they are the form
+# `docker compose up` honors without swarm.
+
+x-lim-go:      &lim-go      {mem_limit: 512m,  cpus: 1.0}
+x-lim-orch:    &lim-orch    {mem_limit: 768m,  cpus: 1.5}
+x-lim-ui:      &lim-ui      {mem_limit: 1536m, cpus: 2.0}
+x-lim-cache:   &lim-cache   {mem_limit: 512m,  cpus: 1.0}
+x-lim-ingress: &lim-ingress {mem_limit: 256m,  cpus: 1.0}
+x-lim-db:      &lim-db      {mem_limit: 1g,    cpus: 2.0}
+x-lim-olap:    &lim-olap    {mem_limit: 2g,    cpus: 2.0}
+x-lim-minio:   &lim-minio   {mem_limit: 1g,    cpus: 1.5}
+x-lim-k3s:     &lim-k3s     {mem_limit: 2g,    cpus: 2.0}
+x-lim-mock:    &lim-mock    {mem_limit: 256m,  cpus: 0.5}
+
+services:
+  # datastores / infra
+  db:              {<<: *lim-db}
+  redis:           {<<: *lim-cache}
+  minio:           {<<: *lim-minio}
+  databend:        {<<: *lim-olap}
+  traefik:         {<<: *lim-ingress}
+  k3s:             {<<: *lim-k3s}
+  cloudflared:     {<<: *lim-mock}
+
+  # UI (Vite dev server — memory-hungry, hence the wider cap)
+  console-web:     {<<: *lim-ui}
+
+  # orchestrator + the heavier Go image
+  brahmi:          {<<: *lim-orch}
+  skills-registry: {<<: *lim-orch}
+
+  # Go services
+  aramb-gateway:   {<<: *lim-go}
+  cha-ching:       {<<: *lim-go}
+  chil:            {<<: *lim-go}
+  gitana:          {<<: *lim-go}
+  ikki:            {<<: *lim-go}
+  intervix:        {<<: *lim-go}
+  jumbo:           {<<: *lim-go}
+  louie:           {<<: *lim-go}
+  mang-proxy:      {<<: *lim-go}
+  mcp-server:      {<<: *lim-go}
+  narnia:          {<<: *lim-go}
+  narnia-workers:  {<<: *lim-go}
+  notify:          {<<: *lim-go}
+  pool-manager:    {<<: *lim-go}
+  raksha:          {<<: *lim-go}
+  toolkit-proxy:   {<<: *lim-go}
+  vova:            {<<: *lim-go}
+
+  # mocks / helpers
+  mock-services:   {<<: *lim-mock}

@@ -1,0 +1,287 @@
+# Parallel stacks — running feature-branch clones alongside baseline
+
+Goal: run feature-branch copies of the stack **concurrently** with the baseline,
+for **max isolation at minimum duplication**, **derivable addressing** (see a
+request → know the service/clone without hunting ports or reading docs), and
+**no application-code changes** (the service repos are sealed; only clode-stack's
+own compose/scripts change).
+
+This lands in two phases. **Phase 1 (built — `stack fork`)** is full per-clone
+duplication via a Compose project; it's simple, deterministic, and isolates data
+and migrations completely. **Phase 2 (designed, not built — the origin router)**
+is the lean shared-baseline model that clones only the changed subtree. Phase 1
+is what you use today; Phase 2 is the north-star the tooling evolves toward.
+
+---
+
+## Phase 1 — `stack fork` (implemented)
+
+A clone is a **separate Compose project** (`-p <name>`) on its **own bridge
+network**, with its **own traefik on its own host port**. Everything else — the
+Go services, datastores, agents — is namespaced by the project, so two stacks
+never collide.
+
+```
+stack fork <name> --port <traefik-port> [--workspaces <yaml>] [svc...]
+stack fork-down <name>
+stack fork-ls
+```
+
+- **`<name>`** — the Compose project **and** network name (baseline is `clode`;
+  a clone is e.g. `b1`). Containers land as `<name>-<svc>-1`.
+- **`--port`** — the clone's single host port. traefik is the **only** service
+  with a host binding; everything else is in-network. So a whole clone costs
+  **one host port**.
+- **`--workspaces <yaml>`** — a `workspaces.yaml`-format file listing which
+  services build from a **feature-branch worktree**. Those (and only those) are
+  rebuilt and tagged `clode-stack/<svc>:<branch>`; every other service **reuses
+  the baseline image** (`clode-<svc>:latest`) — no rebuild, no extra image disk.
+- **`[svc...]`** — optional subset to bring up (like `stack up`); omit for all.
+- **`--resolve`** — expand the given `[svc...]` seeds to their **dependency
+  closure** (see the resolver below) and auto-enable the profile gates that
+  closure needs, plus `traefik` + `whodb`. So `stack fork b1 --port 8180 --resolve
+  brahmi` wakes brahmi *and everything it needs* — nothing more.
+
+### Service relation map + dependency resolver
+
+`scripts/lib/depgraph.py` (exposed as `stack graph` / `stack resolve` / `stack
+check`) reads the **code-verified annotated graph** `scripts/lib/service-graph.json`.
+Each service has `{gate, buildable, calls:{peer:{rw, for}}}` where `rw` = **R**
+(read) | **W** (writes/mutates the peer) | **RW** | **mint** (issues a token),
+and `for` describes what the call does. Every edge was confirmed against an actual
+client **call site** (a 4-repo audit), so it's the real runtime call graph — not
+`depends_on` (boot order) and not the compose env (the `*service-urls` anchor
+injects URLs into ~22 services regardless of use). Non-dependencies are recorded
+explicitly: `_dead_env` (URL read but never called — e.g. `console-web→jumbo`,
+`jumbo→gitana`) and `_indirect` (config injected into the agent, e.g. `pool-manager`
+seeds `BRAHMI_URL` into the agent, which makes the call).
+
+The graph is hand-maintained (edit the JSON when the code changes) — there is no
+grep-regeneration, because the grep over-counted (dead-env) and under-counted
+(missed `jumbo→akela`).
+
+**`rw` is the load-bearing field for forking.** A forked service falling through
+to a baseline peer is safe for **R** edges, but a **W** edge *mutates baseline
+state* (creates projects/deploys, mints identities, publishes templates, consumes
+pool agents). `stack check <set>` lists the boundary edges and **flags every W
+edge** so you never silently corrupt baseline:
+
+```
+$ stack check brahmi
+DISCONNECTED: in-between node(s) missing from the set —
+  jumbo   <- brahmi[W]   ⚠ WRITE (mutates baseline)
+  raksha  <- brahmi[W]   ⚠ WRITE (mutates baseline)
+  cha-ching <- brahmi[R]                         # read — safe to fall through
+  …
+```
+
+### Pre-flight connectivity (fail fast, no broken flows)
+
+Every `fork` validates that its **run-set is dependency-closed** before starting
+anything. If you forked a subset where an in-between node is dropped (e.g. run
+`brahmi` + `mang-proxy` but not the services they call), the flow would break
+mid-chain — so the fork **aborts before touching Docker** and names the missing
+nodes:
+
+```
+$ stack fork b1 --port 8180 brahmi mang-proxy
+DISCONNECTED: in-between node(s) missing from the set —
+  jumbo   <- called by brahmi, mang-proxy
+  raksha  <- called by brahmi, mang-proxy
+  ...
+add them to the set, or pass --resolve to auto-include the closure.
+```
+
+`--resolve` closes the set by construction (so it always passes); a full clone
+(no subset) is already complete. Run the check standalone with `stack check
+<svc...>`, and see the branch-vs-connecting split for a workspace file with
+`stack resolve --workspace <file>` — that's how the agent learns which
+in-between nodes will run on MAIN and whether any of them also needs branching.
+
+### Addressing (derivable)
+
+Same hostnames as baseline, on the clone's port. The **port tells you the
+clone**, the **hostname tells you the service**:
+
+```
+baseline:   http://brahmi.localhost:8080
+clone b1:   http://brahmi.localhost:8180      (--port 8180)
+clone b1 db viewer: http://whodb.localhost:8180
+```
+
+> Phase 2 moves the clone into the **hostname** (`brahmi-b1.localhost:8080`) so a
+> single shared traefik serves every clone on one port — fully self-describing.
+> Phase 1 keeps per-clone ports because it needs no shared-ingress machinery.
+
+### What the fork does (overlay-only; base compose untouched at runtime)
+
+Generates `.forks/<name>.yml`, a Compose overlay applied on top of the base
+files, that:
+
+1. **Renames the network** — `networks.clode.name: <name>` (the base pins a
+   literal `name: clode`; without this override two projects share one bridge and
+   collide on DNS aliases). This is the load-bearing change that makes a project
+   a self-contained stack.
+2. **Repoints + constrains traefik** — `--providers.docker.network=<name>` and
+   `--providers.docker.constraints=Label(com.docker.compose.project,<name>)` so
+   the clone's traefik only routes its **own** containers, and host port
+   `<traefik-port>:8080` (via the `!override` merge tag, since Compose otherwise
+   *concatenates* `ports`).
+3. **Makes datastores internal** — strips host bindings on `db`, `redis`,
+   `databend`, `louie`, `console-web` (via `!reset []`). No port collisions with
+   baseline; reach data through the clone's WhoDB or `docker exec`.
+4. **Pins images** — every buildable service → `clode-<svc>:latest` (reuse
+   baseline), except changed services → `clode-stack/<svc>:<branch>` (rebuilt).
+   The `clode-stack/` prefix is jumbo's `skipImageValidation` allow-list.
+5. **Adds WhoDB** — a per-clone DB viewer on the clone network, connections
+   pre-wired to the clone's `db`/`redis`, routed at `whodb.localhost:<port>`.
+
+### Base-compose change (one, committed)
+
+Baseline traefik gets `--providers.docker.constraints=Label(com.docker.compose.
+project,clode)` too — otherwise it would pick up a clone's container labels (both
+define a `brahmi` router for `brahmi.localhost`) and log route conflicts. Applying
+it needs one baseline `traefik` recreate.
+
+### Isolation & cost
+
+- Own network + own `db`/`redis`/`minio`/`databend` volumes + own migrations →
+  a clone's schema changes never touch baseline (**separate, non-collapsing
+  databases**).
+- An **unchanged** service in a clone = the baseline image run under a new
+  container name: **RAM + a container, ~0 GB disk** (shared image layers). Only
+  **changed** services rebuild. The dial between "one changed service" and "full
+  stack" is just how many services the workspaces file lists.
+
+### console-web is a static build (light)
+
+`console-web` no longer runs `bun dev` — it's a **multi-stage build** (bun builds
+the SPA → served by `caddy:2-alpine`), routed at `http://console.localhost:8080`.
+~102 MB image, ~caddy RAM instead of ~268 MB of bun+vite; no `node_modules`
+volume, no source bind-mount.
+
+- The SPA calls every backend by **absolute URL** (`raksha.localhost:8080`,
+  `brahmi.localhost:8080`, …), **baked at build time**. Even dev-JWT sign-in hits
+  raksha absolutely, so caddy is **pure static** (SPA fallback via
+  `try_files … /index.html`) — no reverse proxy.
+- **Build files live in clode-stack, not the app repo** — `docker/console-web/`
+  holds the `Dockerfile`, `Caddyfile`, and **`console-web.env`** (the `VITE_*`
+  service URLs). The console-web SOURCE comes in as the `src` named build context
+  (`additional_contexts: { src: ${CONSOLE_WEB_DIR:-../console-web} }`), so the
+  compose stays clean and the Dockerfile is easy to extend. **Why clode-stack
+  owns the URLs:** the app's `.env.local` is *gitignored* (a worktree checkout
+  won't have it) **and** `.dockerignored` (never enters the build) — so it can't
+  be the source. The Dockerfile even `rm`s any app-local `.env*` so
+  `console-web.env` is authoritative and the build is identical from main or a
+  worktree.
+- **CORS:** served at `console.localhost:8080`, its absolute calls are
+  cross-origin. raksha's matcher already allows any `*.localhost` (hostname
+  suffix, port-agnostic); the glafa services (Fiber, exact match) needed
+  `http://console.localhost:8080` added to the `ALLOWED_ORIGINS` anchor (one line).
+- **Trade-off:** no HMR — rebuild with `stack up console-web` to pick up code
+  changes. For fork consoles (`console-<x>.localhost`), glafa's exact CORS would
+  need each origin (or a suffix-matcher ported from raksha — a shared-framework
+  follow-up).
+
+### Known Phase-1 limitations
+
+- Per-clone ports mean the clone is identified by port, not hostname (Phase 2
+  moves the clone into the hostname so one shared ingress serves all clones).
+
+---
+
+## The model: `wfork` — within-network, config-driven
+
+A fork = one container `<svc>-<name>` per changed service, on the **existing
+`clode` network**, reached at `http://<svc>-<name>.localhost:8080` via baseline
+traefik. It's declared in **one reviewable YAML** and applied atomically — there
+is **no per-service invocation** (the config is the single source of truth, so
+what runs is exactly what the file says; no interleaved build/up commands).
+
+```yaml
+# fork.b1.yaml
+name: b1
+services:
+  brahmi:        { branch: feat/x, db: reuse }   # branch → build clode-stack/brahmi:b1
+  aramb-gateway: { mirror: true }                # baseline image, run as aramb-gateway-b1
+console: true                                    # build console-b1 → forked backends
+```
+```
+stack wfork preview --config fork.b1.yaml   # dry-run: boundary report + ⚠WRITE warnings (review this)
+stack wfork up      --config fork.b1.yaml   # the ONLY mutating step (atomic)
+stack wfork down    --config fork.b1.yaml   # tear down (containers + fresh DBs)
+stack wfork ls
+```
+
+**How `up` wires each service** (all from `docker compose config` — no routing layer):
+- **image**: `branch:` → build `clode-stack/<svc>:<name>` from the worktree; `mirror: true` → baseline image (`clode-<svc>:latest`).
+- **env**: lifted from baseline, then the **host token of every forked peer (and self) is rewritten `<peer>` → `<peer>-<name>`** — so `aramb-gateway-b1` gets `BRAHMI_URL=http://brahmi-b1:9000`, `brahmi-b1` gets `CLUSTER_GRPC_ADDR=brahmi-b1:9500`; unlisted peers fall through to baseline by DNS. The rewrite requires a trailing `:port`/`/path`, so `DB_NAME=brahmi` is never corrupted.
+- **command + resource caps** lifted too (brahmi needs `serve`; caps from `docker-compose.limits.yml`).
+- **db**: `reuse` (default) keeps the baseline DB; `fresh` makes `<svc>_<name>` (schema copied via `pg_dump -s`, not `TEMPLATE` — which fails against a live baseline).
+- **console** (`console: true`): a static console-web build with the forked backends' `VITE_*` baked → `console-web-<name>.localhost:8080`. Build-time override, no routing.
+
+**`preview` is the reason set** — it reads the verified graph and prints, before anything runs: what routes to the fork (`aramb-gateway → brahmi ✓`), every **`⚠ WRITE mutates BASELINE`** edge (a forked brahmi still write-calls baseline jumbo/raksha/… unless you fork them too), and baseline callers that won't reach the fork. You validate the spec against consequences, then `up`.
+
+Verified: `fork.t.yaml` (brahmi + aramb-gateway mirror) → both Up on `clode`, `brahmi-t.localhost` health 200, `aramb-gateway-t` correctly rewritten to `brahmi-t`, `DB_NAME` preserved on reuse, `down` clean.
+
+## Superseded: the origin-aware router (NOT built — env override replaces it)
+
+The lean end of the dial: one shared baseline; a clone runs **only the changed
+subtree** and everything else falls through to baseline, decided per request by
+a small Go router. No per-service URL/env changes.
+
+### Addressing
+
+```
+External (ingress):   http://<feature>-<svc>.localhost:8080   (one shared traefik/router, always :8080)
+Internal (svc→svc):    http://<svc>.internal:<port>            (unchanged callers; router disambiguates)
+```
+
+### The router (single Go binary, replaces traefik)
+
+- `.localhost` → dumb passthrough: Host = container name → that container.
+- `.internal` → **origin-aware**: source IP → container name → branch (via
+  `docker.sock:ro` + `/containers/json`, refreshed off the events stream);
+  Host → service; `table[branch][svc]` → `<svc>-<branch>` else baseline `<svc>`.
+- Routing table is a **hot-reloaded JSON** (mtime poll + atomic swap + logged
+  diff); unreachable target → 502.
+
+### Branch = a closed subtree of the dependency graph
+
+Origin survives one hop, so any service that must *reach* a branched service must
+**itself** be branched (else its egress reverts to baseline mid-chain). The
+branch is therefore the **transitive closure** over the dependency graph — the
+agent declares the seed (what it changed) and the closure is computed from the
+graph (extracted from every `*_URL`/`*_ADDR`/`*_BASE_URL` in the compose).
+
+Two tiers per closure member: **build** (has a worktree diff → rebuild from it)
+vs **mirror** (byte-identical → run the baseline image under `<svc>-<branch>`,
+no build, just for origin-tagging).
+
+### Agents
+
+One shared pool-manager + pool; the **claim wrapper** injects the requesting
+branch's call-home URL into the claimed agent — no duplicate pools/VMs.
+
+### Known Phase-2 limit
+
+Branch/stack-scoped, not per-request (true per-request needs header baggage the
+sealed code can't propagate). Sufficient for "test my change against otherwise-
+baseline services."
+
+---
+
+## Resource ceilings (implemented)
+
+`docker-compose.limits.yml` sets a per-service `mem_limit` + `cpus` **ceiling**
+(caps to stop a runaway container — like the usageq hot-loop that once filled the
+disk — not tight packing). `scripts/up.sh` applies it on every bring-up and every
+`stack fork` clone inherits it; `NO_LIMITS=1` skips it. Tiers: Go svc 512m/1cpu,
+brahmi & skills-registry 768m/1.5, console-web 1.5g/2, db 1g/2, databend 2g/2,
+minio 1g/1.5, redis 512m/1, k3s 2g/2, traefik/mocks small.
+
+## Safety prerequisite
+
+Also apply the pending `daemon.json` fix (log rotation `max-size:20m/max-file:5` +
+`builder.gc.defaultKeepStorage` 20→8 GB, one docker restart) — the limits cap RAM,
+this caps log/build-cache disk.

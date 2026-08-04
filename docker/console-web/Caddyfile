@@ -1,0 +1,9 @@
+# Serve the console-web SPA. Every backend is called by absolute URL (baked at
+# build), so this is a pure static server — no reverse proxy. SPA deep-links fall
+# back to index.html.
+:8080 {
+	encode gzip
+	root * /srv
+	try_files {path} /index.html
+	file_server
+}

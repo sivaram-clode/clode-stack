@@ -28,7 +28,7 @@
 #   2. jumbo project + application + draft canvas
 #   3. pool-manager kairo svc_configs row
 #   4. mang-proxy platform-key load (CLAUDE_CODE_OAUTH_TOKEN from host env)
-#   5. skills-registry: import clode-labs/aramb-skills + workflow templates
+#   5. skills-registry: import clode-labs/aramb-skills (direct DB)
 # Idempotent — re-running is a no-op once seeded.
 
 # ----------------------------------------------------------------------
@@ -177,9 +177,9 @@ x-service-urls: &service-urls
 #                      org-pivot gate; cha-ching no longer reads ADMIN_USER_IDS)
 #   - skills-registry→ ADMIN_ORG_ID    (single JWT organization_id gate for
 #                      workflow-template writes)
-# Rotate the UUID as a unit — seed.sh also reads it as the JWT `sub` it
-# mints from raksha for admin API calls (skills-registry import + workflow
-# template POSTs), and seeds/raksha-seed.sql plants the matching
+# Rotate the UUID as a unit — seed.py also uses it as the admin/owner user
+# id when planting rows (raksha users, jumbo pool project, skills owner),
+# and seeds/raksha-seed.sql plants the matching
 # users/organizations/org_members/service_accounts rows at raksha image
 # build time (migrations can't read env vars — keep the UUIDs literal
 # there too).
@@ -236,9 +236,9 @@ x-admin-ids: &admin-ids
 # With `https://srclode.online` in the list, Hostname() == "srclode.online",
 # which then suffix-matches every `*.srclode.online` subdomain.
 x-allowed-origins: &allowed-origins
-  ALLOWED_ORIGINS: "http://localhost:3000,http://localhost:3001,http://localhost:5173,http://localhost:8080,https://srclode.online,https://clode.space"
+  ALLOWED_ORIGINS: "http://localhost:3000,http://localhost:3001,http://localhost:5173,http://localhost:8080,http://console.localhost:8080,https://srclode.online,https://clode.space"
 
-# aramb-vm knobs routed through ec2mock. Merged into both brahmi pods so
+# aramb-vm knobs routed through mock-services. Merged into both brahmi pods so
 # either can process a cloud-provision request via the VM path. AWS creds
 # are dummies — the mock ignores signatures — but the SDK's credential
 # chain still needs *something* to resolve. AGENT_VM_AMI_ID is a
@@ -249,7 +249,7 @@ x-allowed-origins: &allowed-origins
 # string here is the same one the seeder pushes to the mock so the two
 # stay lockstep — if you change one, change the JSON.
 x-arambvm: &arambvm
-  # Provider default is the VM path (aramb-vm via ec2mock). up.sh's
+  # Provider default is the VM path (aramb-vm via mock-services). up.sh's
   # `--agent` flag additionally builds the full benji image locally
   # (../benji/Dockerfile target benji) and sets BENJI_IMAGE so
   # AGENT_VM_IMAGE resolves to the just-built tag; without `--agent`,
@@ -262,7 +262,7 @@ x-arambvm: &arambvm
   AGENT_VM_AMI_ID:             ami-mock-benji
   AGENT_VM_SPOT_ENABLED:       "false"
   AGENT_VM_IMAGE:              ${BENJI_IMAGE:-clode-stack/benji:latest}
-  AGENT_VM_CALLHOME_SECRET:    ec2mock-local-callhome-secret
+  AGENT_VM_CALLHOME_SECRET:    mock-services-local-callhome-secret
   # ../brahmi/.env sets POOL_EXTERNAL=true which routes every inbound
   # GatewayWS through pool-manager's /verify-service. That path is wrong
   # for VM agents (their identity is the HS256 call-home token brahmi
@@ -272,7 +272,7 @@ x-arambvm: &arambvm
   POOL_EXTERNAL:               "true"
   AGENT_VM_POOL_ENABLED:       "true"
   AGENT_VM_POOL_DESIRED_SIZE:  "2"
-  AWS_ENDPOINT_URL_EC2:        http://ec2mock:8080
+  AWS_ENDPOINT_URL_EC2:        http://mock-services:8080
   AWS_ACCESS_KEY_ID:           test
   AWS_SECRET_ACCESS_KEY:       test
   AWS_REGION:                  us-east-1
@@ -304,7 +304,7 @@ services:
   # *.localhost per RFC 6761) and `<svc>.srclode.online` (only reachable
   # when the cloudflared `public` profile is up; its single ingress rule
   # forwards *.srclode.online here). Services never exposed through CF
-  # historically (ec2mock, ikki, minio-console, traefik dashboard) get a
+  # historically (mock-services, ikki, minio-console, traefik dashboard) get a
   # `.localhost` rule ONLY — do not add srclode rules to them, that would
   # publish unauthenticated admin surfaces in --public mode.
   #
@@ -323,17 +323,21 @@ services:
   # on the minio router replaces the old minio-proxy nginx shim. See
   # CLAUDE.md's Cloudflare gotcha for the full story.
   traefik:
-    # ≥3.7 required: older builds pin docker API 1.24, which modern
+    # ≥3.6.1 required: older builds pin docker API 1.24, which modern
     # dockerd (min 1.40) rejects — the provider then loops "client
-    # version 1.24 is too old" and zero routes appear. DOCKER_API_VERSION
-    # is belt-and-braces for builds that honor it.
+    # version 1.24 is too old" and zero routes appear. 3.6.1+ auto-negotiates
+    # the API version with the daemon (traefik PR #12256), so no
+    # DOCKER_API_VERSION pin is needed — and pinning would only rot if the
+    # daemon later raised its minimum past the pinned value.
     image: traefik:v3.7
-    environment:
-      DOCKER_API_VERSION: "1.44"
     command:
       - --providers.docker=true
       - --providers.docker.exposedbydefault=false
       - --providers.docker.network=clode
+      # Only route THIS project's containers. Without it, a `stack fork` clone's
+      # containers (which reuse the same router labels, e.g. Host(`brahmi.localhost`))
+      # would be picked up here too and log route conflicts. Baseline is project `clode`.
+      - --providers.docker.constraints=Label(`com.docker.compose.project`,`clode`)
       - --entrypoints.web.address=:8080
       - --api.dashboard=true
       # ping serves the healthcheck; pin it to the web entrypoint —
@@ -359,13 +363,10 @@ services:
           - minio.srclode.online
           - raksha.localhost
           - raksha.srclode.online
-          # oauth-mock: raksha (container) dials the token/userinfo endpoints
-          # AND the CDP browser hits the consent screen — one URL for both.
-          - oauth-mock.localhost
           - intervix.localhost
           - intervix.srclode.online
           - ikki.localhost
-          - ec2mock.localhost
+          - mock-services.localhost
     healthcheck:
       test: ["CMD", "traefik", "healthcheck", "--ping"]
       interval: 30s
@@ -447,30 +448,12 @@ services:
       start_period: 10s
     restart: unless-stopped
 
-  minio-setup:
-    image: minio/mc:latest
-    depends_on:
-      minio: { condition: service_healthy }
-    entrypoint:
-      - sh
-      - -c
-      - |
-        set -e
-        mc alias set local http://minio:9000 minioadmin minioadmin
-        mc mb --ignore-existing local/databend
-        mc anonymous set public local/databend
-        # brahmi attachment uploads — local-only bucket; brahmi's STORAGE_BUCKET
-        # env is overridden in the brahmi service block to point at this name.
-        mc mb --ignore-existing local/brahmi-attachments
-        # ikki session-context tarballs (per-user browser profile blobs)
-        mc mb --ignore-existing local/ikki-session-contexts
-        # intervix recordings + per-turn audit audio
-        mc mb --ignore-existing local/intervix-recordings
-        # vova per-turn voice audio audit blobs (raw deepgram input + tts output).
-        # Bucket is private; vova reads/writes via path-style with static minio creds.
-        mc mb --ignore-existing local/vova-audio
-    networks: [clode]
-    restart: "no"
+  # NOTE: minio bucket creation is no longer a one-shot compose container. It
+  # lives in scripts/up.py (ensure_minio_buckets) which brings minio up and
+  # creates the buckets via a throwaway `mc` run before the services that need
+  # them at boot (databend et al.) start — nothing lingers as Exited(0), and the
+  # bucket list/policies are in code, easy to extend. Those services now gate on
+  # `minio: service_healthy` directly.
 
   databend:
     image: datafuselabs/databend:latest
@@ -498,7 +481,7 @@ services:
       - "13307:3307"   # MySQL wire — connect DBeaver as "MySQL"
       - "18000:8000"   # HTTP handler — REST/query
     depends_on:
-      minio-setup: { condition: service_completed_successfully }
+      minio: { condition: service_healthy }
     networks: [clode]
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/v1/health"]
@@ -541,16 +524,18 @@ services:
       # dead). Pinning it here makes the local stack behaviour explicit and
       # immune to future env drift.
       WEB_APP_URL: http://localhost:3001
-      # Point raksha's Google OAuth at the local oauth-mock instead of the real
-      # accounts.google.com, so the consent screen is a plain form a CDP browser
-      # can drive. One base covers all three endpoints ({base}/o/oauth2/auth,
-      # /token, /oauth2/v2/userinfo); the URL resolves from BOTH the browser and
-      # the raksha container via the traefik alias `oauth-mock.localhost` (above).
-      # The mock ignores client creds, so the real GOOGLE_CLIENT_ID from .env is
-      # reused as-is. To use real Google instead, comment this out (raksha reads
-      # it as optional — unset = real Google). (oauth-mock also serves GitHub;
-      # wire GITHUB_OAUTH_BASE_URL the same way once raksha grows that override.)
-      GOOGLE_OAUTH_BASE_URL: http://oauth-mock.localhost:8080
+      # Point raksha's Google OAuth at the mock-services `oauth-mock` group
+      # instead of real accounts.google.com, so the consent screen is a plain
+      # form a CDP browser can drive. One base covers all three endpoints
+      # ({base}/o/oauth2/auth, /token, /oauth2/v2/userinfo — raksha concatenates
+      # onto the base, so the /oauth-mock path prefix carries through); the URL
+      # resolves from BOTH the browser and the raksha container via the traefik
+      # alias `mock-services.localhost` (above). The mock ignores client creds,
+      # so the real GOOGLE_CLIENT_ID from .env is reused as-is. To use real
+      # Google instead, comment this out (raksha reads it as optional — unset =
+      # real Google). (The group also serves GitHub, but raksha has no
+      # GITHUB_OAUTH_BASE_URL override, so GitHub stays real.)
+      GOOGLE_OAUTH_BASE_URL: http://mock-services.localhost:8080/oauth-mock
       # Route raksha's transactional emails through the local notify service.
       # NOTIFY_URL comes from *service-urls (http://notify:8080), NOTIFY_ADMIN_ORG_ID
       # from *admin-ids, and raksha mints the SA token in-process against the
@@ -598,35 +583,6 @@ services:
     restart: unless-stopped
 
   # ------------------------------------------------------------------
-  # oauth-mock — OAuth provider test double (google + github, opt-in)
-  # ------------------------------------------------------------------
-  # Renders a plain-form "consent screen" a CDP browser can fill, and hands
-  # back whatever email is typed as the signed-in user (name/id/avatar are
-  # derived from it). Serves each provider's real endpoint paths. Only used
-  # when raksha's *_OAUTH_BASE_URL points here (see the raksha block);
-  # otherwise it just idles. Local-only test double — never CF-exposed, so a
-  # `.localhost`-only router (like ec2mock/ikki). Source: docker/oauth-mock/.
-  oauth-mock:
-    build:
-      context: ./docker/oauth-mock
-    environment:
-      LISTEN_ADDR: ":8080"
-      # Prefills the single email field; name/id/avatar are derived from it.
-      DEFAULT_EMAIL: testuser@clode.dev
-    labels:
-      - traefik.enable=true
-      - traefik.http.routers.oauth-mock.rule=Host(`oauth-mock.localhost`)
-      - traefik.http.services.oauth-mock.loadbalancer.server.port=8080
-    networks: [clode]
-    healthcheck:
-      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://127.0.0.1:8080/healthz || exit 1"]
-      interval: 60s
-      timeout: 5s
-      retries: 3
-      start_period: 5s
-    restart: unless-stopped
-
-  # ------------------------------------------------------------------
   # jumbo — platform service (agent deploys, namespaces, identity)
   # ------------------------------------------------------------------
   jumbo:
@@ -643,12 +599,12 @@ services:
       # so locally-built kairo images at `clode-stack/benji:latest` (from
       # ./stack.sh up --agent) skip the registry HEAD probe.
       PLATFORM_REPO: clode-stack
-      # Route deployment batches at the always-up ec2mock deployer facade (its
+      # Route deployment batches at the always-up mock-services deployer facade (its
       # /narnia group pulls config back + posts the status callback), so a
       # default stack completes jumbo deploys without the real narnia +
       # narnia-workers + argocd chain. `--profile deploy` (real narnia) instead:
       # export NARNIA_BASE_URL=http://narnia:8081 before `./stack.sh up`.
-      NARNIA_BASE_URL: ${NARNIA_BASE_URL:-http://ec2mock:8080/narnia}
+      NARNIA_BASE_URL: ${NARNIA_BASE_URL:-http://mock-services:8080/narnia}
     labels:
       - traefik.enable=true
       - traefik.http.routers.jumbo.rule=Host(`jumbo.localhost`) || Host(`jumbo.srclode.online`)
@@ -680,7 +636,7 @@ services:
       - ../brahmi/.env
     environment:
       # *s3-common precedes *arambvm so the minio creds win over arambvm's
-      # ec2mock test/test creds (ec2mock ignores them); brahmi's one AWS creds
+      # mock-services test/test creds (mock-services ignores them); brahmi's one AWS creds
       # pair thus serves both its S3 client and the mock EC2 client.
       <<: [*db-common, *s3-common, *redis-common, *service-urls, *admin-ids, *allowed-origins, *arambvm]
       DB_NAME: brahmi
@@ -703,8 +659,8 @@ services:
       db: { condition: service_healthy }
       redis: { condition: service_healthy }
       raksha: { condition: service_healthy }
-      minio-setup: { condition: service_completed_successfully }
-      ec2mock: { condition: service_healthy }
+      minio: { condition: service_healthy }
+      mock-services: { condition: service_healthy }
     networks: [clode]
     healthcheck:
       test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://127.0.0.1:9000/health || exit 1"]
@@ -733,15 +689,15 @@ services:
       DB_NAME: pool-manager
       PORT: 8080
       # Cloud/jumbo-deployer mode: pool-manager deploys agents via jumbo
-      # (→ ec2mock's /narnia group) and polls health via ec2mock's /baghira
+      # (→ mock-services's /narnia group) and polls health via mock-services's /baghira
       # group — one deployer for the whole stack instead of pool-manager
       # docker-running agents itself. (LOCAL_MODE=true reverts to direct
       # `docker run` + docker-inspect health, bypassing jumbo/narnia/baghira.)
       LOCAL_MODE: "false"
       DOCKER_NETWORK: clode
       # JUMBO_BASE_URL inherits from the *service-urls anchor (http://jumbo:8080).
-      # BAGHIRA_BASE_URL points at the always-up ec2mock /baghira group.
-      BAGHIRA_BASE_URL: http://ec2mock:8080/baghira
+      # BAGHIRA_BASE_URL points at the always-up mock-services /baghira group.
+      BAGHIRA_BASE_URL: http://mock-services:8080/baghira
       # BRAHMI_URL / BRAHMI_BASE_URL / BRAHMI_WS_URL inherit from the
       # *service-urls anchor (http://brahmi:9000, ws://brahmi:9000).
     volumes:
@@ -884,7 +840,7 @@ services:
       # intervix's outward URL — used by the interview agent (curl
       # $BACKEND_URL/agent/setup.sh and the /score POST) and by the
       # recruiter UI for absolute-URL construction. Locally the agent is
-      # a container on the `clode` bridge (via ec2mock/pool), so the
+      # a container on the `clode` bridge (via mock-services/pool), so the
       # traefik alias serves agent and browser from the same origin — no
       # tunnel hop for either.
       BACKEND_URL:  ${STACK_SCHEME:-http}://intervix.${STACK_DOMAIN:-localhost}${STACK_PORT-:8080}
@@ -933,7 +889,7 @@ services:
       raksha:      { condition: service_healthy }
       brahmi:      { condition: service_healthy }
       vova:        { condition: service_healthy }
-      minio-setup: { condition: service_completed_successfully }
+      minio: { condition: service_healthy }
     networks: [clode]
     healthcheck:
       test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://127.0.0.1:8080/health || exit 1"]
@@ -999,7 +955,7 @@ services:
       redis:       { condition: service_healthy }
       raksha:      { condition: service_healthy }
       brahmi:      { condition: service_healthy }
-      minio-setup: { condition: service_completed_successfully }
+      minio: { condition: service_healthy }
     networks: [clode]
     healthcheck:
       # debian:bookworm-slim runtime (vova is the only non-alpine service
@@ -1122,7 +1078,7 @@ services:
       - traefik.http.services.ikki.loadbalancer.server.port=7602
     depends_on:
       redis: { condition: service_healthy }
-      minio-setup: { condition: service_completed_successfully }
+      minio: { condition: service_healthy }
     networks: [clode]
     healthcheck:
       test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://127.0.0.1:7602/health || exit 1"]
@@ -1307,11 +1263,11 @@ services:
       ENVIRONMENT: local
       HAS_DB: "true"
       DB_NAME: toolkit_proxy
-      # Point Composio at the local mock (the composio group in ec2mock) instead
+      # Point Composio at the local mock (the composio group in mock-services) instead
       # of the real backend.composio.dev in ../toolkit-proxy/.env. Inline here so
       # it overrides env_file — connections + tools work end-to-end with no real
       # Composio key or browser OAuth. github still routes through gitana.
-      COMPOSIO_BASE_URL: http://ec2mock:8080/composio
+      COMPOSIO_BASE_URL: http://mock-services:8080/composio
     labels:
       - traefik.enable=true
       - traefik.http.routers.toolkit-proxy.rule=Host(`toolkit-proxy.localhost`) || Host(`toolkit-proxy.srclode.online`)
@@ -1319,7 +1275,7 @@ services:
     depends_on:
       db: { condition: service_healthy }
       raksha: { condition: service_healthy }
-      ec2mock: { condition: service_healthy }
+      mock-services: { condition: service_healthy }
     networks: [clode]
     healthcheck:
       test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://127.0.0.1:8080/health || exit 1"]
@@ -1586,7 +1542,7 @@ services:
     restart: unless-stopped
 
   # ------------------------------------------------------------------
-  # ec2mock — unified local docker-deployer. Always up (no profile). One
+  # mock-services — unified local docker-deployer. Always up (no profile). One
   # HTTP server fronts three API groups against the host daemon:
   #   aws     — EC2 wire protocol for brahmi's aramb-vm provider
   #             (RunInstances → docker create, StopInstances → docker stop, …).
@@ -1614,9 +1570,9 @@ services:
   # data/pool-manager-svc-configs.json and PUTs it to /_admin/config/default-image
   # so the mock spawns the same container image pool-manager would.
   # ------------------------------------------------------------------
-  ec2mock:
+  mock-services:
     build:
-      context: ${EC2MOCK_DIR:-./docker/ec2-docker-mock}
+      context: ${MOCK_SERVICES_DIR:-./docker/mock-services}
     # --pull-policy=Never: the images this mock spawns live under a
     # local-only namespace (clode-stack/*), so hitting Docker Hub for
     # them would 401. Build them locally with `./stack.sh up --agent`
@@ -1627,23 +1583,31 @@ services:
       # `composio_mock` database on the shared Postgres and persists connections
       # + tool data there, keyed by connect-ref. A connection completes only when
       # its returned OAuth URL is opened + authorized (no auto-activation).
-      # COMPOSIO_MOCK_PUBLIC_URL defaults to the traefik ec2mock.localhost route.
+      # COMPOSIO_MOCK_PUBLIC_URL defaults to the traefik mock-services.localhost route.
       <<: *db-common
       # The /narnia group pulls each deployment's config from jumbo and posts
       # status callbacks back to it. Lazy — only dialed when a deploy arrives,
-      # so no depends_on on jumbo (avoids a jumbo↔ec2mock cycle).
+      # so no depends_on on jumbo (avoids a jumbo↔mock-services cycle).
       JUMBO_BASE_URL: http://jumbo:8080
+      # The /oauth-mock group prefills the consent form's email field with this;
+      # name/id/avatar are derived from whatever email is submitted.
+      DEFAULT_EMAIL: testuser@clode.dev
+      # The /db group is a bearer-gated MCP server for querying the datastores
+      # (postgres/redis/databend) — register it as an MCP at
+      # http://mock-services.localhost:8080/db with this token. Postgres reuses
+      # the DB_* env above; redis/databend fall back to in-network defaults.
+      MOCK_SERVICES_DB_MCP_TOKEN: clode-db-mcp-local
     depends_on:
       db: { condition: service_healthy }
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
     labels:
       # host-side hits for /_admin/* + EC2-wire smoke tests go through
-      # traefik at ec2mock.localhost:8080. LOCAL-ONLY on purpose: the
+      # traefik at mock-services.localhost:8080. LOCAL-ONLY on purpose: the
       # admin API is unauthenticated — never add a srclode rule here.
       - traefik.enable=true
-      - traefik.http.routers.ec2mock.rule=Host(`ec2mock.localhost`)
-      - traefik.http.services.ec2mock.loadbalancer.server.port=8080
+      - traefik.http.routers.mock-services.rule=Host(`mock-services.localhost`)
+      - traefik.http.services.mock-services.loadbalancer.server.port=8080
     networks: [clode]
     healthcheck:
       test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://127.0.0.1:8080/health || exit 1"]
@@ -1721,39 +1685,30 @@ services:
   # on start reconciles it to whichever checkout is mounted.
   # ------------------------------------------------------------------
   console-web:
-    image: oven/bun:1
-    working_dir: /app
-    # --backend=copyfile: node_modules is a separate docker volume from bun's
-    # in-image cache, and bun's default hardlink backend cannot link across
-    # filesystems (it fails mid-extract, e.g. on wrangler). copyfile crosses
-    # the boundary reliably.
-    # dev-entrypoint.sh installs from npm by default; when the workspace selects a
-    # local aramb-sdk-node worktree (LOCAL_SDK=1, mounted at /aramb-sdk-node) it
-    # links that built copy instead — so an unpublished SDK works locally.
-    command: ["sh", "/dev-entrypoint.sh"]
-    env_file: [../console-web/.env.local]
-    environment:
-      # "1" only when workspaces.yaml selects an `aramb-sdk-node:` line (up.sh
-      # then exports ARAMB_SDK_NODE_DIR); empty otherwise → npm path, manifest
-      # left as-is. Do NOT hardcode — this is the opt-in switch.
-      LOCAL_SDK: "${ARAMB_SDK_NODE_DIR:+1}"
-      # ikki (browser-session manager) base for the Browser tab's recording
-      # fetch. env.ts uses this as the BROWSER's absolute ikki base (not just a
-      # server-side proxy target), so it must be reachable from the host browser
-      # AND CORS-allowed by ikki. The traefik `ikki.localhost:8080` router fits
-      # (ikki's ALLOWED_ORIGINS includes localhost:3001). An in-network address
-      # like ikki:7602 breaks here — the host browser can't resolve it.
-      VITE_IKKI_BASE_URL: http://ikki.localhost:8080
-    ports:
-      - "3001:3001"
-    volumes:
-      - ${CONSOLE_WEB_DIR:-../console-web}:/app
-      - console_web_node_modules:/app/node_modules
-      - ./scripts/console-web-dev-entrypoint.sh:/dev-entrypoint.sh:ro
-      # The aramb-sdk-node checkout (worktree when selected, else the main repo —
-      # ignored unless LOCAL_SDK is set). Bind-mounted so the SDK can build in place.
-      - ${ARAMB_SDK_NODE_DIR:-../aramb-sdk-node}:/aramb-sdk-node
+    # Static production build served by caddy — no bun-dev, no node_modules
+    # volume, no source at runtime. The SPA calls every backend by ABSOLUTE URL
+    # (raksha.localhost:8080, brahmi.localhost:8080, …), baked at BUILD time. Even
+    # dev-JWT sign-in hits raksha absolutely, so a plain static file server is all
+    # that runs — no reverse proxy. Rebuild (`stack up console-web`) to refresh;
+    # there is no HMR. Dockerfile + Caddyfile + the VITE_* URLs (console-web.env)
+    # live in ./docker/console-web (committed, worktree-safe); the console-web
+    # SOURCE comes in as the `src` named context (honours CONSOLE_WEB_DIR).
+    build:
+      context: ./docker/console-web
+      dockerfile: Dockerfile
+      additional_contexts:
+        src: ${CONSOLE_WEB_DIR:-../console-web}
+    # Versioned tag (branch/workspace/main), never :latest — the generated
+    # docker-compose.images.yml pins the same tag; this keeps it correct even
+    # without the overlay.
+    image: clode-console-web:${CONSOLE_WEB_TAG:-main}
     networks: [clode]
+    labels:
+      - traefik.enable=true
+      # single ingress: http://console.localhost:8080 (and console.localhost:<port>
+      # in a `stack fork` clone). caddy serves the SPA on :8080.
+      - traefik.http.routers.console-web.rule=Host(`console.localhost`)
+      - traefik.http.services.console-web.loadbalancer.server.port=8080
     restart: unless-stopped
 
 volumes:

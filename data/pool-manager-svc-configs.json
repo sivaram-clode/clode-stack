@@ -14,7 +14,7 @@
       "service_type": "kairo",
       "settings": {
         "cpu": 3.5,
-        "image": "clode-stack/benji:latest",
+        "image": "clode-stack/benji",
         "memory": 12,
         "publicNet": true,
         "runAsRoot": true,
@@ -69,7 +69,7 @@
       "service_type": "kairo-ephemeral",
       "settings": {
         "cpu": 3.5,
-        "image": "clode-stack/benji:latest",
+        "image": "clode-stack/benji",
         "memory": 12,
         "publicNet": true,
         "runAsRoot": true,
@@ -109,7 +109,7 @@
       "service_type": "aramb-browser",
       "settings": {
         "cpu": 0.5,
-        "image": "clode-stack/brave-head:latest",
+        "image": "clode-stack/brave-head",
         "memory": 1,
         "runAsRoot": true,
         "healthChecks": [
