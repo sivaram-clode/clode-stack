@@ -497,9 +497,13 @@ ON CONFLICT (service_type) DO UPDATE
         KAIRO_JSON = s.REPO_DIR / "data" / "pool-manager-svc-configs.json"
         with open(KAIRO_JSON) as f:
             _cfgs = json.load(f)["configs"]
+        # Prefer the locally-built versioned benji tag (up.py exports BENJI_IMAGE
+        # when it builds the pool image) over the config's (now versionless) value
+        # — a versionless ref would push as :latest and never match the local build.
         _kairo_imgs = [c["settings"].get("image") for c in _cfgs if c["service_type"] == "kairo"]
-        KAIRO_IMG = "\n".join("null" if i is None else str(i) for i in _kairo_imgs)
-        if not KAIRO_IMG or KAIRO_IMG == "null":
+        _cfg_img = next((str(i) for i in _kairo_imgs if i), "")
+        KAIRO_IMG = os.environ.get("BENJI_IMAGE") or _cfg_img
+        if not KAIRO_IMG:
             warn("no kairo image found in %s — mock-services default_image not seeded" % KAIRO_JSON)
         else:
             say("mock-services: pushing default_image=%s" % KAIRO_IMG)

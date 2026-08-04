@@ -62,6 +62,7 @@ itself idempotent — SQL ON CONFLICT, skills-registry slug-409, etc.).
 """
 import os
 import sys
+import json
 import shutil
 import random
 import tempfile
@@ -109,6 +110,82 @@ def ensure_minio_buckets():
     # (else `sh` is parsed as an mc subcommand).
     s.docker("run", "--rm", "--network", s.NET, "--entrypoint", "sh",
              "minio/mc:latest", "-c", script)
+
+
+# pool-manager svc-config image repo -> how to build it locally, versioned, from
+# the workspace. Driven by data/pool-manager-svc-configs.json: every ENABLED
+# config whose image repo is here is built (if missing) and its versioned tag is
+# pushed into svc_configs (and, for benji, the mock's RunInstances default) via
+# the seeder's <override_env>. This replaces the --agent/--browser flags — the
+# JSON's `enabled` is the opt-in; the flags only FORCE a rebuild.
+POOL_BUILDS = {
+    "clode-stack/benji": {
+        "ctx": lambda: os.environ.get("BENJI_DIR") or "../benji",
+        "target": "benji",
+        "build_args": lambda: [f"BRAHMI_IMAGE=clode-brahmi:{os.environ.get('BRAHMI_TAG') or 'main'}"],
+        "tag": lambda: os.environ.get("BENJI_TAG") or "main",
+        "override_env": "BENJI_IMAGE", "provider_vm": True, "stateable": True,
+    },
+    "clode-stack/brave-head": {
+        "ctx": lambda: f"{os.environ.get('AGENT_BASE_DOCKER_DIR') or '../agent-base-docker'}/brave-headed",
+        "target": None,
+        "build_args": lambda: [],
+        "tag": lambda: os.environ.get("AGENT_BASE_DOCKER_TAG") or "main",
+        "override_env": "BROWSER_IMAGE", "provider_vm": False, "stateable": False,
+    },
+}
+
+
+def build_pool_images(force=frozenset(), state_tarball=""):
+    """Build the agent images the pool config asks for — from the JSON, not flags.
+
+    Reads data/pool-manager-svc-configs.json; for every ENABLED config whose
+    image repo is locally buildable (POOL_BUILDS), build it VERSIONED from the
+    workspace (:<branch|main>, never :latest) if it's missing, then export the
+    seeder's <override_env> so the svc_config row (and the mock's default image)
+    use that exact local tag. A versionless config image can't resolve to a local
+    versioned build on its own (docker reads bare repo as :latest), so the tag is
+    injected here. `force` (repos, from --agent/--browser) rebuilds even if present.
+    """
+    cfg_path = s.REPO_DIR / "data" / "pool-manager-svc-configs.json"
+    if not cfg_path.is_file():
+        return
+    configs = json.loads(cfg_path.read_text()).get("configs") or []
+    want = {(c.get("settings") or {}).get("image", "").rsplit(":", 1)[0]
+            for c in configs if c.get("enabled")}
+    want |= set(force)
+    for repo in sorted(r for r in want if r in POOL_BUILDS):
+        rec = POOL_BUILDS[repo]
+        image = f"{repo}:{rec['tag']()}"
+        ctx = _abs_ctx(rec["ctx"]())
+        df = ctx / "Dockerfile"
+        if not df.is_file():
+            _err(f"error: {repo}: Dockerfile not found at {df} (checkout/workspace missing?)")
+            raise SystemExit(2)
+        present = s.docker("image", "inspect", image, capture=True, check=False).returncode == 0
+        if present and repo not in force:
+            s.log(f"pool image {image} present — reusing (--agent/--browser forces a rebuild)")
+        else:
+            args = []
+            for a in rec["build_args"]():
+                args += ["--build-arg", a]
+            if rec["target"]:
+                args += ["--target", rec["target"]]
+            s.log(f"building pool image {image} from {ctx}")
+            s.docker("build", "-f", df, *args, "-t", image, ctx, env={"DOCKER_BUILDKIT": "1"})
+        # --state overlay (benji only): bake the tarball in + disable the OCI pull.
+        if rec["stateable"] and state_tarball:
+            s.log(f"overlaying local state: {state_tarball} -> {image} (BENJI_STATE_PULL=false)")
+            sc = tempfile.mkdtemp()
+            shutil.copy(_abs_ctx(state_tarball), os.path.join(sc, "state.tar.gz"))
+            with open(os.path.join(sc, "Dockerfile"), "w") as f:
+                f.write(f"FROM {image}\nCOPY state.tar.gz /opt/benji/state.tar.gz\nENV BENJI_STATE_PULL=false\n")
+            s.docker("build", "-t", image, sc, env={"DOCKER_BUILDKIT": "1"})
+            shutil.rmtree(sc)
+        os.environ[rec["override_env"]] = image
+        if rec["provider_vm"]:
+            os.environ["AGENT_PROVIDER"] = "aramb-vm"
+        s.log(f"  {repo} -> {image} (svc_configs override via {rec['override_env']})")
 
 
 def parse_args(argv):
@@ -227,22 +304,11 @@ def main(argv=None):
     public_mode = a["public_mode"]
     services = a["services"]
 
-    # --state=build builds the agent image too (the state is baked into it),
-    # so it implies --agent — no need to pass both.
-    if state_build:
+    # --state (any form) bakes a state tarball into the benji image, so it forces
+    # a benji build (via the force-set below) regardless of what the pool config
+    # enables — no separate --agent needed.
+    if state_build or state_tarball or state_defaulted:
         agent_build = True
-
-    # --state gate: overlays the given tarball onto the built image as the
-    # baked state (/opt/benji/state.tar.gz) and sets BENJI_STATE_PULL=false so
-    # the entrypoint seeds from it instead of pulling the prod OCI registry's
-    # :latest at boot. Pure docker — no registry, no extra services; same
-    # pattern as ../benji/Dockerfile.local-overlay. Meaningless without an
-    # image build to overlay onto.
-    if state_tarball or state_defaulted:
-        if not agent_build:
-            _err("error: --state requires --agent (the state is baked into the "
-                 "locally-built agent image)")
-            raise SystemExit(2)
     # An explicit --state path is checked now; a bare --state default is resolved
     # and checked after workspace resolution (it tracks the benji build context).
     if state_tarball and not _abs_ctx(state_tarball).is_file():
@@ -372,85 +438,22 @@ def main(argv=None):
             print(f"    --- batch: {' '.join(batch)} ---")
             s.compose("build", *batch, env=build_env)
 
-    # Build the full benji agent image locally from the benji checkout
-    # (benji_ctx = the workspaces.yaml `benji:` override, else ../benji;
-    # Dockerfile, target benji). Only runs when --agent is passed; otherwise
-    # skipped entirely — brahmi stays on the pool path with no local build needed.
-    # Reuses the brahmi image built above instead of pulling
-    # ghcr.io/clode-labs/brahmi:main. The agent-base base image is pulled from
-    # GHCR (requires a docker login with a token that can read the
-    # agent-base-docker packages).
+    # Build the agent images the pool config asks for (from the JSON's `enabled`,
+    # not flags) — benji for kairo*, brave-head for aramb-browser, each versioned
+    # from its workspace and built only if missing. --agent/--browser just FORCE a
+    # rebuild of the corresponding image. Both bases pull from GHCR (needs a
+    # docker login that can read the clode-labs / agent-base-docker packages);
+    # disable a config in the JSON to opt out. Runs after the compose build so the
+    # brahmi image benji builds FROM already exists.
+    force = set()
     if agent_build:
-        # The clode-stack/ prefix is jumbo's local-dev allow-list (see
-        # jumbo/internal/service/service_configuration_service.go's
-        # skipImageValidation) — anything with this prefix skips the registry
-        # HEAD check.
-        # Versioned tags, never :latest — the benji tag names its branch/workspace
-        # (BENJI_TAG from workspaces, else main); the brahmi base image it builds
-        # FROM uses brahmi's own versioned tag (must match what compose built).
-        benji_tag = os.environ.get("BENJI_TAG") or "main"
-        brahmi_tag = os.environ.get("BRAHMI_TAG") or "main"
-        benji_image = f"clode-stack/benji:{benji_tag}"
-        s.log(f"building benji agent image: {benji_image} (Dockerfile --target benji) from {benji_ctx}")
-        ctx = _abs_ctx(benji_ctx)
-        s.docker(
-            "build", "-f", ctx / "Dockerfile", "--target", "benji",
-            "--build-arg", f"BRAHMI_IMAGE=clode-brahmi:{brahmi_tag}",
-            "-t", benji_image, ctx,
-            env={"DOCKER_BUILDKIT": "1"},
-        )
-
-        # --state: retag with the tarball as the baked state and the boot-time
-        # OCI pull disabled (same pattern as ../benji/Dockerfile.local-overlay).
-        if state_tarball:
-            s.log(f"overlaying local state: {state_tarball} → {benji_image} (BENJI_STATE_PULL=false)")
-            state_ctx = tempfile.mkdtemp()
-            shutil.copy(_abs_ctx(state_tarball), os.path.join(state_ctx, "state.tar.gz"))
-            with open(os.path.join(state_ctx, "Dockerfile"), "w") as f:
-                f.write(
-                    f"FROM {benji_image}\n"
-                    "COPY state.tar.gz /opt/benji/state.tar.gz\n"
-                    "ENV BENJI_STATE_PULL=false\n"
-                )
-            s.docker("build", "-t", benji_image, state_ctx, env={"DOCKER_BUILDKIT": "1"})
-            shutil.rmtree(state_ctx)
-
-        # Consumed by the docker-compose x-arambvm anchor
-        # (AGENT_VM_IMAGE=${BENJI_IMAGE:-…}) and flips brahmi's provider to
-        # the direct-EC2 path via mock-services. Also read by seed.sh's pool-manager
-        # step so the svc_configs row uses the same tag.
-        os.environ["BENJI_IMAGE"] = benji_image
-        os.environ["AGENT_PROVIDER"] = "aramb-vm"
-        s.log(f"brahmi will provision via aramb-vm (AGENT_PROVIDER=aramb-vm, AGENT_VM_IMAGE={benji_image})")
-
-    # Build the brave-head browser image locally from the agent-base-docker
-    # checkout (browser_ctx = the workspaces.yaml `agent-base-docker:` override,
-    # else ../agent-base-docker; the brave-headed subdir is the build context and
-    # the Dockerfile's own dir). Only runs when --browser is passed; otherwise
-    # skipped entirely — pool-manager keeps the aramb-browser row's JSON default
-    # image with no local build. The clode-stack/ tag matches the JSON default
-    # (imagePullPolicy IfNotPresent), so pool-manager's DockerDeployer uses this
-    # build instead of a registry pull. The louie build stage is pulled from GHCR
-    # (requires a docker login with a token that can read the clode-labs packages).
+        force.add("clode-stack/benji")
     if browser_build:
-        browser_ctx = f"{os.environ.get('AGENT_BASE_DOCKER_DIR') or '../agent-base-docker'}/brave-headed"
-        ctx = _abs_ctx(browser_ctx)
-        if not (ctx / "Dockerfile").is_file():
-            _err(f"error: brave-head Dockerfile not found at {browser_ctx}/Dockerfile")
-            raise SystemExit(2)
-        # Versioned tag, never :latest — names agent-base-docker's branch/workspace.
-        browser_tag = os.environ.get("AGENT_BASE_DOCKER_TAG") or "main"
-        browser_image = f"clode-stack/brave-head:{browser_tag}"
-        s.log(f"building brave-head browser image: {browser_image} from {browser_ctx}")
-        s.docker(
-            "build", "-f", ctx / "Dockerfile", "-t", browser_image, ctx,
-            env={"DOCKER_BUILDKIT": "1"},
-        )
-
-        # Read by seed.sh's pool-manager step so the aramb-browser svc_configs row
-        # uses the same tag that was just built.
-        os.environ["BROWSER_IMAGE"] = browser_image
-        s.log(f"pool-manager will warm aramb-browser from {browser_image}")
+        force.add("clode-stack/brave-head")
+    build_pool_images(force=force, state_tarball=state_tarball)
+    if os.environ.get("AGENT_PROVIDER") == "aramb-vm":
+        s.log("brahmi will provision via aramb-vm (AGENT_PROVIDER=aramb-vm, "
+              f"AGENT_VM_IMAGE={os.environ.get('BENJI_IMAGE')})")
 
     # Create minio buckets before the services that need them at boot start
     # (replaces the minio-setup one-shot). Only when minio is actually in scope.
