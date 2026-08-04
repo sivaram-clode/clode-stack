@@ -108,7 +108,9 @@ func (c *Core) approve(ctx *fiber.Ctx) error {
 		dest.RawQuery = rq.Encode()
 		return ctx.Redirect(dest.String(), fiber.StatusFound)
 	}
-	email := strings.TrimSpace(ctx.FormValue("email"))
+	// FormValue is backed by the reused request buffer; the store outlives this
+	// handler (read back on the later token/userinfo request), so clone it.
+	email := strings.Clone(strings.TrimSpace(ctx.FormValue("email")))
 	if email == "" {
 		email = c.defaultEmail
 	}
