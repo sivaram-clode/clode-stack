@@ -122,12 +122,17 @@ def agent_images():
     if os.environ.get("BROWSER_IMAGE"):
         lines.append(os.environ["BROWSER_IMAGE"])
 
-    # Legacy + current local tags up.sh has produced — catches containers
-    # launched under an older tag scheme that is no longer the seeded
-    # default.
-    for tag in ("latest", "dev", "vm", "voice", "slim"):
-        lines.append(f"clode-stack/benji:{tag}")
-    lines.append("clode-stack/brave-head:latest")
+    # Every local benji / brave-head image tag on the daemon. Images are now
+    # tagged by branch/workspace/main (never :latest), so enumerate whatever
+    # tags actually exist rather than a fixed list — catches containers launched
+    # under any tag (:main, :<branch>, or a legacy :latest/:dev/…).
+    imgs = s.docker("images", "--format", "{{.Repository}}:{{.Tag}}",
+                    "--filter", "reference=clode-stack/benji",
+                    "--filter", "reference=clode-stack/brave-head",
+                    capture=True, check=False).stdout
+    for ln in imgs.split():
+        if ln and not ln.endswith(":<none>"):
+            lines.append(ln)
 
     return _dedup(lines)
 

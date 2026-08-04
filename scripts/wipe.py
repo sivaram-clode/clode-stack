@@ -9,7 +9,7 @@
 #   • every within-network fork (clode.wfork) container + its fork-specific
 #     images (clode-stack/<svc>:<name>, clode-console-web-<name>)
 #   • every named volume mock-services owns (label aws.mock.owned=true)
-#   • generated build-cache/*.Dockerfile + docker-compose.cache.yml
+#   • generated build-cache/*.Dockerfile + docker-compose.{cache,images}.yml
 #
 # What this PRESERVES by default:
 #   • the working tree (source files, configs)
@@ -78,7 +78,7 @@ def main():
             "    • all clode-stack containers + within-network forks (clode.wfork), volumes (named + anonymous)\n"
             "    • all images for this stack (built + pulled bases + kairo agent) + fork images\n"
             "    • every mock-services-owned volume (aws.mock.owned=true)\n"
-            "    • generated build-cache/*.Dockerfile + docker-compose.cache.yml\n"
+            "    • generated build-cache/*.Dockerfile + docker-compose.{cache,images}.yml\n"
             + ("    • the GLOBAL BuildKit cache (every project on this daemon) — because --prune-cache\n"
                if args.prune_cache
                else "    • BuildKit cache is KEPT (rebuilds stay fast; pass --prune-cache to also clear it)\n")
@@ -105,7 +105,7 @@ def main():
     # ── stage 1b: within-network forks (wfork — clode.wfork=1, outside compose) ─
     # Remove fork containers + their FORK-SPECIFIC images (branch builds
     # clode-stack/<svc>:<name> and clode-console-web-<name>) — but NOT baseline
-    # mirror images (clode-<svc>:latest) or the agent tiers, which are shared.
+    # mirror images (clode-<svc>:<branch|main>) or the agent tiers, which are shared.
     # Fork logical DBs (<svc>_<name>) vanish with the postgres volume in stage 2.
     fork_ids = s.containers("label=clode.wfork=1")
     if fork_ids:
@@ -212,8 +212,9 @@ def main():
             for f in bc.glob("*.Dockerfile"):
                 f.unlink()
         (s.REPO_DIR / "docker-compose.cache.yml").unlink(missing_ok=True)
+        (s.REPO_DIR / "docker-compose.images.yml").unlink(missing_ok=True)
     else:
-        print("  \033[2m$\033[0m rm build-cache/*.Dockerfile docker-compose.cache.yml")
+        print("  \033[2m$\033[0m rm build-cache/*.Dockerfile docker-compose.cache.yml docker-compose.images.yml")
 
     # ── stage 7: BuildKit cache (global) — OPT-IN ─────────────────────────────
     # gen-build-cache injects `--mount=type=cache,target=/go/pkg/mod` and

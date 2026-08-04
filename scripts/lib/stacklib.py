@@ -55,11 +55,14 @@ def run(args, *, capture=False, check=True, env=None, stdin=None, cwd=None):
 
 
 def compose_files():
-    """-f flags: base + cache (if present) + limits (unless NO_LIMITS)."""
+    """-f flags: base + cache + images (if present) + limits (unless NO_LIMITS)."""
     files = ["-f", REPO_DIR / "docker-compose.yml"]
     cache = REPO_DIR / "docker-compose.cache.yml"
     if cache.exists():
         files += ["-f", cache]
+    images = REPO_DIR / "docker-compose.images.yml"
+    if images.exists():
+        files += ["-f", images]
     limits = REPO_DIR / "docker-compose.limits.yml"
     if limits.exists() and not os.environ.get("NO_LIMITS"):
         files += ["-f", limits]

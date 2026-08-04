@@ -185,7 +185,9 @@ def fresh_db(svc, name, base_db):
 
 
 def console_up(name, forked, project):
-    cname, img = f"console-web-{name}", f"clode-console-web-{name}:latest"
+    # Tag the fork image with the fork name (never :latest); the repo already
+    # carries -{name}, so wipe/prune's clode-console-web- prefix match still holds.
+    cname, img = f"console-web-{name}", f"clode-console-web-{name}:{name}"
     bargs = []
     for p in forked:
         if p in VITE_VAR:
@@ -261,7 +263,10 @@ def cmd_up(cfg):
             s.log(f"{svc}: building {image} from '{m['branch']}'")
             branch_build(svc, m["branch"], image)
         else:
-            image = f"{project}-{svc}:latest"
+            # Mirror the baseline's versioned image (…:<branch|main>, never
+            # :latest). compose config carries the resolved tag via the generated
+            # docker-compose.images.yml; fall back to :main if it wasn't generated.
+            image = (cfg_services[svc].get("image") or "").strip() or f"{project}-{svc}:main"
             s.docker("image", "inspect", image, capture=True, check=False).returncode == 0 or \
                 s.die(f"{image} not built (run stack up {svc} first)")
             s.log(f"{svc}: mirror ({image})")
@@ -319,7 +324,6 @@ def cmd_prune():
         cmd_down(n)  # removes containers + fork DBs + the applied spec
     # drop fork-specific images (branch builds + fork consoles); never baseline mirrors
     imgs = s.docker("images", "--format", "{{.Repository}}:{{.Tag}}", capture=True).stdout.split()
-    tiers = {"latest", "dev", "vm", "voice", "slim"}
     fork_imgs = [i for i in imgs
                  if i.startswith("clode-console-web-")
                  or (i.startswith("clode-stack/") and i.rsplit(":", 1)[-1] in names)]

@@ -1610,6 +1610,11 @@ services:
       # The /oauth-mock group prefills the consent form's email field with this;
       # name/id/avatar are derived from whatever email is submitted.
       DEFAULT_EMAIL: testuser@clode.dev
+      # The /db group is a bearer-gated MCP server for querying the datastores
+      # (postgres/redis/databend) — register it as an MCP at
+      # http://mock-services.localhost:8080/db with this token. Postgres reuses
+      # the DB_* env above; redis/databend fall back to in-network defaults.
+      MOCK_SERVICES_DB_MCP_TOKEN: clode-db-mcp-local
     depends_on:
       db: { condition: service_healthy }
     volumes:
@@ -1711,7 +1716,10 @@ services:
       dockerfile: Dockerfile
       additional_contexts:
         src: ${CONSOLE_WEB_DIR:-../console-web}
-    image: clode-console-web:latest
+    # Versioned tag (branch/workspace/main), never :latest — the generated
+    # docker-compose.images.yml pins the same tag; this keeps it correct even
+    # without the overlay.
+    image: clode-console-web:${CONSOLE_WEB_TAG:-main}
     networks: [clode]
     labels:
       - traefik.enable=true

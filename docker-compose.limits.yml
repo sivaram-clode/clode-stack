@@ -58,5 +58,4 @@ services:
   vova:            {<<: *lim-go}
 
   # mocks / helpers
-  ec2mock:         {<<: *lim-mock}
-  oauth-mock:      {<<: *lim-mock}
+  mock-services:   {<<: *lim-mock}

@@ -40,6 +40,7 @@ Populated module state, keyed by service name:
 ``resolve_workspaces()`` returns ``{svc: {"dir":…, "label":…, "status":…}}``.
 """
 import os
+import re
 import sys
 import subprocess
 from pathlib import Path
@@ -72,6 +73,7 @@ _WS_MARKER = {
 WS_DIR = {}
 WS_LABEL = {}
 WS_STATUS = {}
+WS_TAG = {}
 WS_ANY = False
 WORKSPACES_FILE = "workspaces.yaml"
 
@@ -100,6 +102,31 @@ def _ctx_path(ctx: str) -> Path:
 def _ws_var(svc: str) -> str:
     """service name -> env var name (pool-manager -> POOL_MANAGER_DIR)."""
     return svc.upper().replace("-", "_") + "_DIR"
+
+
+def _ws_tag_var(svc: str) -> str:
+    """service name -> image-tag env var (pool-manager -> POOL_MANAGER_TAG)."""
+    return svc.upper().replace("-", "_") + "_TAG"
+
+
+def _sanitize_tag(s: str) -> str:
+    """Docker-tag-safe: keep [A-Za-z0-9_.-], map everything else (e.g. the '/'
+    in feat/x) to '-', trim leading '.'/'-' (illegal tag starts). Falls back to
+    'main' if nothing survives."""
+    return re.sub(r"[^A-Za-z0-9_.-]", "-", s).lstrip(".-") or "main"
+
+
+def _ws_tag(svc: str, dir_: str) -> str:
+    """Image tag for a service build: the checkout's branch (sanitized), or
+    'main' when it resolves to the primary checkout / has no branch. Never
+    'latest' — the tag always names which branch/workspace the image holds."""
+    if os.path.realpath(_ctx_path(dir_)) == os.path.realpath(_ctx_path(_ws_base(svc))):
+        return "main"
+    r = _git(_ctx_path(dir_), "rev-parse", "--abbrev-ref", "HEAD")
+    branch = r.stdout.strip() if r.returncode == 0 else ""
+    if not branch or branch == "HEAD":  # detached / no git — name it by the dir
+        return _sanitize_tag(os.path.basename(os.path.normpath(dir_)))
+    return _sanitize_tag(branch)
 
 
 def _ws_base(svc: str) -> str:
@@ -186,8 +213,8 @@ def _ws_label(svc: str, dir_: str) -> str:
 def resolve_workspaces() -> dict:
     """Parse workspaces.yaml, populate the module globals, export ``<SVC>_DIR``,
     and return ``{svc: {"dir":…, "label":…, "status":…}}``."""
-    global WS_DIR, WS_LABEL, WS_STATUS, WS_ANY, WORKSPACES_FILE
-    WS_DIR, WS_LABEL, WS_STATUS, WS_ANY = {}, {}, {}, False
+    global WS_DIR, WS_LABEL, WS_STATUS, WS_TAG, WS_ANY, WORKSPACES_FILE
+    WS_DIR, WS_LABEL, WS_STATUS, WS_TAG, WS_ANY = {}, {}, {}, {}, False
     WORKSPACES_FILE = _workspaces_file()
     wf = _ctx_path(WORKSPACES_FILE)
     if not wf.is_file():
@@ -215,9 +242,16 @@ def resolve_workspaces() -> dict:
             WS_STATUS[svc] = "ok"
         else:
             WS_STATUS[svc] = "MISSING"
+        # Image tag: this checkout's branch (sanitized), else 'main'. An explicit
+        # <SVC>_TAG env wins (mirrors the <SVC>_DIR override); the compose image:
+        # for each buildable service reads ${<SVC>_TAG:-main}.
+        tagvar = _ws_tag_var(svc)
+        WS_TAG[svc] = os.environ.get(tagvar) or _ws_tag(svc, dir_)
+        os.environ[tagvar] = WS_TAG[svc]
         if os.path.realpath(d) != os.path.realpath(_ctx_path(base)):
             WS_ANY = True
-    return {svc: {"dir": WS_DIR[svc], "label": WS_LABEL[svc], "status": WS_STATUS[svc]}
+    return {svc: {"dir": WS_DIR[svc], "label": WS_LABEL[svc],
+                  "status": WS_STATUS[svc], "tag": WS_TAG[svc]}
             for svc in WS_DIR}
 
 
@@ -240,11 +274,12 @@ def print_workspace_table() -> None:
     print(f"  WORKSPACE OVERRIDES   (clode-stack/{WORKSPACES_FILE})")
     print("  code builds from these checkouts; env still loads from each service's main-repo .env")
     print(line)
-    print(f"  {'SERVICE':<16}  {'BRANCH / SOURCE':<24}  {'BUILD CONTEXT':<34}  {'STATUS'}")
-    print(f"  {'----------------':<16}  {'------------------------':<24}  "
-          f"{'----------------------------------':<34}  {'------'}")
+    print(f"  {'SERVICE':<16}  {'BRANCH / SOURCE':<24}  {'IMAGE TAG':<16}  {'BUILD CONTEXT':<30}  {'STATUS'}")
+    print(f"  {'----------------':<16}  {'------------------------':<24}  {'----------------':<16}  "
+          f"{'------------------------------':<30}  {'------'}")
     for svc in sorted(WS_DIR):
         print(f"  {_ws_trunc(svc, 16):<16}  {_ws_trunc(WS_LABEL[svc], 24):<24}  "
-              f"{_ws_trunc(WS_DIR[svc], 34):<34}  {WS_STATUS[svc]}")
+              f"{_ws_trunc(WS_TAG.get(svc, 'main'), 16):<16}  "
+              f"{_ws_trunc(WS_DIR[svc], 30):<30}  {WS_STATUS[svc]}")
     print(line)
     print()

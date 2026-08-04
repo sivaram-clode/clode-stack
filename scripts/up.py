@@ -356,12 +356,17 @@ def main(argv=None):
         # jumbo/internal/service/service_configuration_service.go's
         # skipImageValidation) — anything with this prefix skips the registry
         # HEAD check.
-        benji_image = "clode-stack/benji:latest"
+        # Versioned tags, never :latest — the benji tag names its branch/workspace
+        # (BENJI_TAG from workspaces, else main); the brahmi base image it builds
+        # FROM uses brahmi's own versioned tag (must match what compose built).
+        benji_tag = os.environ.get("BENJI_TAG") or "main"
+        brahmi_tag = os.environ.get("BRAHMI_TAG") or "main"
+        benji_image = f"clode-stack/benji:{benji_tag}"
         s.log(f"building benji agent image: {benji_image} (Dockerfile --target benji) from {benji_ctx}")
         ctx = _abs_ctx(benji_ctx)
         s.docker(
             "build", "-f", ctx / "Dockerfile", "--target", "benji",
-            "--build-arg", "BRAHMI_IMAGE=clode-brahmi:latest",
+            "--build-arg", f"BRAHMI_IMAGE=clode-brahmi:{brahmi_tag}",
             "-t", benji_image, ctx,
             env={"DOCKER_BUILDKIT": "1"},
         )
@@ -404,7 +409,9 @@ def main(argv=None):
         if not (ctx / "Dockerfile").is_file():
             _err(f"error: brave-head Dockerfile not found at {browser_ctx}/Dockerfile")
             raise SystemExit(2)
-        browser_image = "clode-stack/brave-head:latest"
+        # Versioned tag, never :latest — names agent-base-docker's branch/workspace.
+        browser_tag = os.environ.get("AGENT_BASE_DOCKER_TAG") or "main"
+        browser_image = f"clode-stack/brave-head:{browser_tag}"
         s.log(f"building brave-head browser image: {browser_image} from {browser_ctx}")
         s.docker(
             "build", "-f", ctx / "Dockerfile", "-t", browser_image, ctx,
