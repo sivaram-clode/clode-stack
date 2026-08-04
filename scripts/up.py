@@ -118,11 +118,21 @@ def ensure_minio_buckets():
 # pushed into svc_configs (and, for benji, the mock's RunInstances default) via
 # the seeder's <override_env>. This replaces the --agent/--browser flags — the
 # JSON's `enabled` is the opt-in; the flags only FORCE a rebuild.
+def _svc_tag(svc):
+    """The image tag resolve_workspaces exported for a service (its branch), else
+    'main'. brahmi->BRAHMI_TAG, agent-base-docker->AGENT_BASE_DOCKER_TAG, …"""
+    return os.environ.get(svc.upper().replace("-", "_") + "_TAG") or "main"
+
+
 POOL_BUILDS = {
     "clode-stack/benji": {
         "ctx": lambda: os.environ.get("BENJI_DIR") or "../benji",
         "target": "benji",
-        "build_args": lambda: [f"BRAHMI_IMAGE=clode-brahmi:{os.environ.get('BRAHMI_TAG') or 'main'}"],
+        # benji is built FROM the brahmi image (its "root"); use the RESPECTIVE
+        # versioned brahmi (same BRAHMI_TAG the compose build tagged), and declare
+        # the dependency so it's ensured-present before benji builds.
+        "depends": [("brahmi", "clode-brahmi")],
+        "build_args": lambda: [f"BRAHMI_IMAGE=clode-brahmi:{_svc_tag('brahmi')}"],
         "tag": lambda: os.environ.get("BENJI_TAG") or "main",
         "override_env": "BENJI_IMAGE", "provider_vm": True, "stateable": True,
     },
@@ -162,6 +172,15 @@ def build_pool_images(force=frozenset(), state_tarball=""):
         if not df.is_file():
             _err(f"error: {repo}: Dockerfile not found at {df} (checkout/workspace missing?)")
             raise SystemExit(2)
+        # Ensure the images this one is built FROM exist first (benji FROM the
+        # respective clode-brahmi:<tag>). It's a local-only image, so a missing
+        # FROM would try to pull and fail — build it via compose (same tag).
+        for dep_svc, dep_repo in rec.get("depends", []):
+            dep_img = f"{dep_repo}:{_svc_tag(dep_svc)}"
+            if s.docker("image", "inspect", dep_img, capture=True, check=False).returncode != 0:
+                s.log(f"  {repo}: dependency {dep_img} missing — building {dep_svc}")
+                s.compose("build", dep_svc,
+                          env={"DOCKER_BUILDKIT": "1", "COMPOSE_DOCKER_CLI_BUILD": "1"})
         present = s.docker("image", "inspect", image, capture=True, check=False).returncode == 0
         if present and repo not in force:
             s.log(f"pool image {image} present — reusing (--agent/--browser forces a rebuild)")
