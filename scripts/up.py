@@ -17,6 +17,11 @@ Usage:
     ./up.py --agent --state              # + bake <benji>/archives/benji-state.tar.gz into the agent
                                          #   image and skip the boot-time OCI state pull entirely
     ./up.py --agent --state=/path/to/state.tar.gz      # same, custom tarball
+    ./up.py --state=build                # build state.tar.gz FRESH from ../benji-state +
+                                         #   ../aramb-skills (benji-state/scripts/zip-and-push.sh
+                                         #   --no-push) and bake that in. Implies --agent. Both
+                                         #   source checkouts honor workspaces.yaml overrides
+                                         #   (benji-state:/aramb-skills: -> BENJI_STATE_DIR/ARAMB_SKILLS_DIR).
     ./up.py --browser                    # + build the brave-head browser image
                                          #   (agent-base-docker/brave-headed Dockerfile) that
                                          #   pool-manager warms as the aramb-browser pool. Builds
@@ -92,6 +97,8 @@ def parse_args(argv):
     state_tarball = ""     # "" = agent image keeps its default boot-time state pull
     state_defaulted = False  # True = bare --state (no path); default tarball is resolved
                              #        after workspace resolution, against benji's checkout
+    state_build = False    # True = --state=build; build state.tar.gz fresh from
+                           #        benji-state + aramb-skills (implies --agent)
     public_mode = False
     services = []
 
@@ -139,19 +146,27 @@ def parse_args(argv):
             browser_build = True
             i += 1
         elif arg == "--state":
-            # Optional value; bare --state defers to the default tarball, resolved
-            # after workspace resolution so it tracks a benji worktree override.
+            # Optional value: `build` = build fresh from benji-state (below);
+            # a file path = that tarball; bare = the default committed tarball,
+            # resolved after workspace resolution so it tracks a benji override.
             nxt = argv[i + 1] if i + 1 < n else ""
-            if nxt and nxt[0] != "-" and _abs_ctx(nxt).is_file():
+            if nxt == "build":
+                state_build = True
+                i += 2
+            elif nxt and nxt[0] != "-" and _abs_ctx(nxt).is_file():
                 state_tarball = nxt
                 i += 2
             else:
                 state_defaulted = True
                 i += 1
         elif arg.startswith("--state="):
-            state_tarball = arg[len("--state="):]
-            if not state_tarball:
+            val = arg[len("--state="):]
+            if val == "build":
+                state_build = True
+            elif not val:
                 state_defaulted = True
+            else:
+                state_tarball = val
             i += 1
         elif arg == "--":
             services.extend(argv[i + 1:])
@@ -166,7 +181,8 @@ def parse_args(argv):
     return dict(
         batch_arg=batch_arg, profiles=profiles, agent_build=agent_build,
         browser_build=browser_build, state_tarball=state_tarball,
-        state_defaulted=state_defaulted, public_mode=public_mode, services=services,
+        state_defaulted=state_defaulted, state_build=state_build,
+        public_mode=public_mode, services=services,
     )
 
 
@@ -178,8 +194,14 @@ def main(argv=None):
     browser_build = a["browser_build"]
     state_tarball = a["state_tarball"]
     state_defaulted = a["state_defaulted"]
+    state_build = a["state_build"]
     public_mode = a["public_mode"]
     services = a["services"]
+
+    # --state=build builds the agent image too (the state is baked into it),
+    # so it implies --agent — no need to pass both.
+    if state_build:
+        agent_build = True
 
     # --state gate: overlays the given tarball onto the built image as the
     # baked state (/opt/benji/state.tar.gz) and sets BENJI_STATE_PULL=false so
@@ -249,9 +271,37 @@ def main(argv=None):
     # `benji:` line (default ../benji). benji isn't a compose service, so this
     # is the one place that consumes it.
     benji_ctx = os.environ.get("BENJI_DIR") or "../benji"
-    # Resolve a bare `--state` default against that same checkout, so a benji
+    # --state=build: assemble state.tar.gz fresh from the benji-state repo +
+    # aramb-skills, instead of baking benji's committed archive. Both source
+    # checkouts honor workspaces.yaml (BENJI_STATE_DIR / ARAMB_SKILLS_DIR), else
+    # ../benji-state and ../aramb-skills. benji-state's own zip-and-push.sh does
+    # the work (--no-push = build + validate, no OCI login/push); ARAMB_SKILLS_DIR
+    # makes it bundle the local skills tree instead of cloning main.
+    if state_build:
+        bs_dir = _abs_ctx(os.environ.get("BENJI_STATE_DIR") or "../benji-state")
+        sk_dir = _abs_ctx(os.environ.get("ARAMB_SKILLS_DIR") or "../aramb-skills")
+        zip_sh = bs_dir / "scripts" / "zip-and-push.sh"
+        if not zip_sh.is_file():
+            _err(f"error: benji-state build script not found: {zip_sh}")
+            raise SystemExit(2)
+        if not sk_dir.is_dir():
+            _err(f"error: aramb-skills checkout not found: {sk_dir}")
+            raise SystemExit(2)
+        out_dir = tempfile.mkdtemp()
+        # COMMIT_SHA is required by the script (used only for the --no-push log
+        # line here); use benji-state's HEAD so the label is meaningful.
+        sha = s.run(["git", "-C", str(bs_dir), "rev-parse", "HEAD"],
+                    capture=True, check=False).stdout.strip() or "local"
+        s.log(f"building benji-state tarball from {bs_dir} (skills: {sk_dir})")
+        s.run(["bash", str(zip_sh), "--no-push"],
+              env={"COMMIT_SHA": sha, "ARAMB_SKILLS_DIR": str(sk_dir), "RUNNER_TEMP": out_dir})
+        state_tarball = os.path.join(out_dir, "state.tar.gz")
+        if not _abs_ctx(state_tarball).is_file():
+            _err(f"error: benji-state build did not produce {state_tarball}")
+            raise SystemExit(2)
+    # Resolve a bare `--state` default against benji's checkout, so a benji
     # worktree's own archived state is what gets baked in.
-    if state_defaulted:
+    elif state_defaulted:
         state_tarball = f"{benji_ctx}/archives/benji-state.tar.gz"
         if not _abs_ctx(state_tarball).is_file():
             _err(f"error: state tarball not found: {state_tarball}")

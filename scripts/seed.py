@@ -21,10 +21,10 @@
 #   cha-ching        llm/cloud tier defaults + credit catalogue
 #   jumbo            pool project + application + draft canvas          (needs raksha)
 #   pool-manager     kairo svc_configs row(s) from data/*.json
-#   skills-registry  admin JWT + skills import + workflow templates     (needs raksha)
+#   skills-registry  admin JWT + skills import                          (needs raksha)
 #
-# Idempotency: SQL uses ON CONFLICT DO NOTHING/UPDATE; skills-registry
-# workflow-template POSTs skip on 409; skills import is UPSERT by full_id.
+# Idempotency: SQL uses ON CONFLICT DO NOTHING/UPDATE; skills import is
+# UPSERT by full_id.
 #
 # Provider tokens (CLAUDE_CODE_OAUTH_TOKEN, ANTHROPIC_API_KEY, OPENAI_API_KEY,
 # CODEX_OAUTH_TOKEN+REFRESH) are mang-proxy's concern — set them in
@@ -516,115 +516,64 @@ ON CONFLICT (service_type) DO UPDATE
     else:
         skip("ec2mock not in scope — skipping default_image seed")
 
-    # ── 4. skills-registry — admin JWT + import + workflow templates ──────
-    # Gate on both self and raksha: JWT is minted from raksha's dev endpoint,
-    # and workflow-template POSTs are authenticated with that JWT. Without
-    # raksha there's no auth path here.
-    if in_scope("skills-registry") and in_scope("raksha"):
-        say("skills-registry: minting admin JWT from raksha")
-        _code, _body = s.http("GET", "%s/generate-dev-jwt-access-token?sub=%s" % (RAKSHA_URL, ADMIN_USER_ID), timeout=None)
-        try:
-            ADMIN_JWT = json.loads(_body)["OK"]["Jwt"]
-        except (ValueError, KeyError, TypeError):
-            ADMIN_JWT = None
-        if not ADMIN_JWT or ADMIN_JWT == "null":
-            warn("could not mint admin JWT from raksha — skills-registry seed skipped")
+    # ── 4. skills-registry — skills import (direct DB) ────────────────────
+    # Skills are parsed from ../aramb-skills and UPSERTed straight into the
+    # skills_registry DB, so this step is raksha-independent (no JWT needed).
+    if in_scope("skills-registry"):
+        # Parse SKILL.md files under ../aramb-skills locally and UPSERT repos +
+        # skills + skill_versions directly into skills_registry. Bypasses
+        # /api/v1/me/import (which walks GitHub anonymously and gets rate-limited
+        # at 60 req/hr). Idempotent via ON CONFLICT DO UPDATE. Column overrides
+        # for category/tags/etc. live in data/skill-overrides.json.
+        say("skills-registry: seeding skills from ../aramb-skills (direct DB)")
+        aramb_skills = s.REPO_DIR.parent / "aramb-skills"
+        if not aramb_skills.is_dir():
+            warn("../aramb-skills not found — skipping skills seed")
+        elif not shutil.which("python3"):
+            warn("python3 not on PATH — skipping skills seed")
         else:
-            ok("JWT minted (sub=%s)" % ADMIN_USER_ID)
-
-            # 4a. skills — parse SKILL.md files under ../aramb-skills locally and
-            # UPSERT repos + skills + skill_versions directly into skills_registry.
-            # Bypasses /api/v1/me/import (which walks GitHub anonymously and gets
-            # rate-limited at 60 req/hr). Idempotent via ON CONFLICT DO UPDATE.
-            # Column overrides for category/tags/etc. live in data/skill-overrides.json.
-            say("skills-registry: seeding skills from ../aramb-skills (direct DB)")
-            aramb_skills = s.REPO_DIR.parent / "aramb-skills"
-            if not aramb_skills.is_dir():
-                warn("../aramb-skills not found — skipping skills seed")
-            elif not shutil.which("python3"):
-                warn("python3 not on PATH — skipping skills seed")
+            try:
+                sk_branch = s.run(
+                    ["git", "-C", str(aramb_skills), "rev-parse", "--abbrev-ref", "HEAD"],
+                    capture=True, check=False,
+                ).stdout.strip() or "?"
+            except Exception:
+                sk_branch = "?"
+            try:
+                sk_commit = s.run(
+                    ["git", "-C", str(aramb_skills), "rev-parse", "--short", "HEAD"],
+                    capture=True, check=False,
+                ).stdout.strip() or "?"
+            except Exception:
+                sk_commit = "?"
+            if sk_branch != "main":
+                warn("../aramb-skills is on '%s', not main — seeding HEAD=%s as-is" % (sk_branch, sk_commit))
+            # Run the local skill-emitter and pipe its SQL straight into psql,
+            # capturing psql's combined stdout+stderr for the summary/tail below.
+            emit = subprocess.run(
+                [str(s.REPO_DIR / "scripts" / "seed-skills-from-local.py")],
+                cwd=str(s.REPO_DIR),
+                env={**os.environ, "ADMIN_USER_ID": ADMIN_USER_ID},
+                stdout=subprocess.PIPE, text=True,
+            )
+            sink = subprocess.run(
+                psql_argv("-d", "skills_registry"),
+                input=emit.stdout or "",
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+            )
+            sk_out = sink.stdout or ""
+            if emit.returncode == 0 and sink.returncode == 0:
+                # A no-match grep must not be fatal here.
+                summary = ""
+                for line in sk_out.splitlines():
+                    if line.startswith("-- summary"):
+                        summary = line
+                        break
+                ok(summary or "seeded skills from ../aramb-skills @%s" % sk_commit)
             else:
-                try:
-                    sk_branch = s.run(
-                        ["git", "-C", str(aramb_skills), "rev-parse", "--abbrev-ref", "HEAD"],
-                        capture=True, check=False,
-                    ).stdout.strip() or "?"
-                except Exception:
-                    sk_branch = "?"
-                try:
-                    sk_commit = s.run(
-                        ["git", "-C", str(aramb_skills), "rev-parse", "--short", "HEAD"],
-                        capture=True, check=False,
-                    ).stdout.strip() or "?"
-                except Exception:
-                    sk_commit = "?"
-                if sk_branch != "main":
-                    warn("../aramb-skills is on '%s', not main — seeding HEAD=%s as-is" % (sk_branch, sk_commit))
-                # Run the local skill-emitter and pipe its SQL straight into psql,
-                # capturing psql's combined stdout+stderr for the summary/tail below.
-                emit = subprocess.run(
-                    [str(s.REPO_DIR / "scripts" / "seed-skills-from-local.py")],
-                    cwd=str(s.REPO_DIR),
-                    env={**os.environ, "ADMIN_USER_ID": ADMIN_USER_ID},
-                    stdout=subprocess.PIPE, text=True,
-                )
-                sink = subprocess.run(
-                    psql_argv("-d", "skills_registry"),
-                    input=emit.stdout or "",
-                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-                )
-                sk_out = sink.stdout or ""
-                if emit.returncode == 0 and sink.returncode == 0:
-                    # A no-match grep must not be fatal here.
-                    summary = ""
-                    for line in sk_out.splitlines():
-                        if line.startswith("-- summary"):
-                            summary = line
-                            break
-                    ok(summary or "seeded skills from ../aramb-skills @%s" % sk_commit)
-                else:
-                    warn("skills seed failed — output below")
-                    for line in sk_out.splitlines()[-30:]:
-                        sys.stderr.write("    %s\n" % line)
-
-            # 4b. workflow templates — POST each entry from data/workflow-templates.json.
-            # 409 means slug already exists (idempotent skip); anything else is logged.
-            say("skills-registry: workflow templates (20 entries)")
-            with open(s.REPO_DIR / "data" / "workflow-templates.json") as f:
-                templates = json.load(f)
-            total = len(templates)
-            created = 0
-            skipped = 0
-            failed = 0
-            for i in range(0, total):
-                slug = templates[i]["slug"]
-                payload = json.dumps(templates[i])
-                http, body = s.http(
-                    "POST", "%s/api/v1/workflow-templates" % SKILLS_URL,
-                    data=payload,
-                    headers={
-                        "Authorization": "Bearer %s" % ADMIN_JWT,
-                        "Content-Type": "application/json",
-                    },
-                    timeout=None,
-                )
-                if http in (201, 200):
-                    ok("%s: created" % slug)
-                    created += 1
-                elif http == 409:
-                    skip("%s: exists" % slug)
-                    skipped += 1
-                else:
-                    try:
-                        body_fmt = json.dumps(json.loads(body), separators=(",", ":"))
-                    except ValueError:
-                        body_fmt = body
-                    warn("%s: HTTP %s — %s" % (slug, http, body_fmt))
-                    failed += 1
-            sys.stdout.write("\n  workflow templates: created=%d skipped=%d failed=%d\n" % (created, skipped, failed))
-            sys.stdout.flush()
-    elif in_scope("skills-registry"):
-        skip("skills-registry in scope but raksha isn't — skipping (no JWT auth path)")
+                warn("skills seed failed — output below")
+                for line in sk_out.splitlines()[-30:]:
+                    sys.stderr.write("    %s\n" % line)
 
     # ── 5. nudge restart-loopers ──────────────────────────────────────────
     # Services that depend on a seeded raksha row (pool-manager) or a freshly

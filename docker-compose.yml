@@ -28,7 +28,7 @@
 #   2. jumbo project + application + draft canvas
 #   3. pool-manager kairo svc_configs row
 #   4. mang-proxy platform-key load (CLAUDE_CODE_OAUTH_TOKEN from host env)
-#   5. skills-registry: import clode-labs/aramb-skills + workflow templates
+#   5. skills-registry: import clode-labs/aramb-skills (direct DB)
 # Idempotent — re-running is a no-op once seeded.
 
 # ----------------------------------------------------------------------
@@ -177,9 +177,9 @@ x-service-urls: &service-urls
 #                      org-pivot gate; cha-ching no longer reads ADMIN_USER_IDS)
 #   - skills-registry→ ADMIN_ORG_ID    (single JWT organization_id gate for
 #                      workflow-template writes)
-# Rotate the UUID as a unit — seed.sh also reads it as the JWT `sub` it
-# mints from raksha for admin API calls (skills-registry import + workflow
-# template POSTs), and seeds/raksha-seed.sql plants the matching
+# Rotate the UUID as a unit — seed.py also uses it as the admin/owner user
+# id when planting rows (raksha users, jumbo pool project, skills owner),
+# and seeds/raksha-seed.sql plants the matching
 # users/organizations/org_members/service_accounts rows at raksha image
 # build time (migrations can't read env vars — keep the UUIDs literal
 # there too).

@@ -57,9 +57,14 @@ _WS_DEFAULT_CTX = {
 # Services whose project marker is NOT a repo-root Dockerfile/package.json —
 # a checkout is "ok" only when this path (relative to the resolved context)
 # exists. agent-base-docker builds the brave-head image from its brave-headed
-# subdir, so the repo root has no Dockerfile of its own.
+# subdir, so the repo root has no Dockerfile of its own. benji-state and
+# aramb-skills aren't compose services or built images — they're data-source
+# checkouts consumed by `up --state=build` — so their marker is a defining file
+# (validates the path is a real checkout, not a stale one).
 _WS_MARKER = {
     "agent-base-docker": "brave-headed/Dockerfile",
+    "benji-state": "agent-skills.yaml",
+    "aramb-skills": "aramb-chat/SKILL.md",
 }
 
 # Populated by resolve_workspaces (module globals so print_workspace_table can
