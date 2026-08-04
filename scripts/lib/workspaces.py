@@ -26,7 +26,7 @@ Selector semantics per value:
 ``.yml`` is accepted as an alias for ``.yaml``.
 
 HOW IT PLUGS IN. resolve_workspaces exports ``<SVC>_DIR`` (brahmi->BRAHMI_DIR,
-pool-manager->POOL_MANAGER_DIR, ec2mock->EC2MOCK_DIR, …) — the exact var the
+pool-manager->POOL_MANAGER_DIR, mock-services->MOCK_SERVICES_DIR, …) — the exact var the
 compose ``build.context: ${<SVC>_DIR:-../<svc>}`` interpolates, and the var
 gen-build-cache reads to find each Dockerfile. An already-set env var wins, so
 ``BRAHMI_DIR=/some/path ./stack.sh up`` overrides the file for one run.
@@ -49,9 +49,9 @@ import stacklib as s  # noqa: E402
 
 # Services whose default context is NOT ../<service-name>. The compose file
 # is the source of truth for these defaults; the only current mismatch is
-# ec2mock, built from ../ec2-docker-mock.
+# mock-services, built from ./docker/mock-services (inside clode-stack).
 _WS_DEFAULT_CTX = {
-    "ec2mock": "../ec2-docker-mock",
+    "mock-services": "./docker/mock-services",
 }
 
 # Services whose project marker is NOT a repo-root Dockerfile/package.json —

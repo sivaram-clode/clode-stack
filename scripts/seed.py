@@ -59,7 +59,7 @@ CHACHING_ADMIN_ORG_ID = "0d44278f-d900-4b9d-bdc2-a8a64e91d422"
 # resolves to loopback natively (systemd-resolved / RFC 6761).
 RAKSHA_URL = "http://raksha.localhost:8080"
 SKILLS_URL = "http://skills-registry.localhost:8080"
-EC2MOCK_URL = "http://ec2mock.localhost:8080"
+MOCK_SERVICES_URL = "http://mock-services.localhost:8080"
 
 
 def say(msg):
@@ -485,36 +485,36 @@ ON CONFLICT (service_type) DO UPDATE
     else:
         skip("pool-manager not in scope — skipping svc_configs seed")
 
-    # ── 3b. ec2mock default image ────────────────────────────────────────
+    # ── 3b. mock-services default image ────────────────────────────────────────
     # Push the kairo image from data/pool-manager-svc-configs.json to the
     # mock's admin API. Same source of truth as pool-manager's svc_configs
     # above — the two stay in lockstep because both derive from the same
     # jq path. The mock uses this as its RunInstances default: brahmi's
     # aramb-vm path sends a placeholder AGENT_VM_AMI_ID and the mock
-    # substitutes the real docker image at launch. Gated on ec2mock being
+    # substitutes the real docker image at launch. Gated on mock-services being
     # in scope, so a stack running without it just skips this step.
-    if in_scope("ec2mock"):
+    if in_scope("mock-services"):
         KAIRO_JSON = s.REPO_DIR / "data" / "pool-manager-svc-configs.json"
         with open(KAIRO_JSON) as f:
             _cfgs = json.load(f)["configs"]
         _kairo_imgs = [c["settings"].get("image") for c in _cfgs if c["service_type"] == "kairo"]
         KAIRO_IMG = "\n".join("null" if i is None else str(i) for i in _kairo_imgs)
         if not KAIRO_IMG or KAIRO_IMG == "null":
-            warn("no kairo image found in %s — ec2mock default_image not seeded" % KAIRO_JSON)
+            warn("no kairo image found in %s — mock-services default_image not seeded" % KAIRO_JSON)
         else:
-            say("ec2mock: pushing default_image=%s" % KAIRO_IMG)
+            say("mock-services: pushing default_image=%s" % KAIRO_IMG)
             http, body = s.http(
-                "PUT", "%s/_admin/config/default-image" % EC2MOCK_URL,
+                "PUT", "%s/_admin/config/default-image" % MOCK_SERVICES_URL,
                 data=json.dumps({"image": KAIRO_IMG}),
                 headers={"Content-Type": "application/json"},
                 timeout=None,
             )
             if http in (200, 204):
-                ok("ec2mock default_image=%s" % KAIRO_IMG)
+                ok("mock-services default_image=%s" % KAIRO_IMG)
             else:
-                warn("ec2mock PUT default-image: HTTP %s — %s" % (http, body))
+                warn("mock-services PUT default-image: HTTP %s — %s" % (http, body))
     else:
-        skip("ec2mock not in scope — skipping default_image seed")
+        skip("mock-services not in scope — skipping default_image seed")
 
     # ── 4. skills-registry — skills import (direct DB) ────────────────────
     # Skills are parsed from ../aramb-skills and UPSERTed straight into the

@@ -11,7 +11,7 @@ Usage:
     ./up.py --profile browser,tools      # CSV — equivalent to repeated --profile flags
     ./up.py --profile voice --profile org
     ./up.py --agent                      # + build the full benji agent image (benji Dockerfile,
-                                         #   target benji) and flip brahmi to aramb-vm (via ec2mock).
+                                         #   target benji) and flip brahmi to aramb-vm (via mock-services).
                                          #   Builds from the workspaces.yaml `benji:` override if set,
                                          #   else ../benji.
     ./up.py --agent --state              # + bake <benji>/archives/benji-state.tar.gz into the agent
@@ -383,7 +383,7 @@ def main(argv=None):
 
         # Consumed by the docker-compose x-arambvm anchor
         # (AGENT_VM_IMAGE=${BENJI_IMAGE:-…}) and flips brahmi's provider to
-        # the direct-EC2 path via ec2mock. Also read by seed.sh's pool-manager
+        # the direct-EC2 path via mock-services. Also read by seed.sh's pool-manager
         # step so the svc_configs row uses the same tag.
         os.environ["BENJI_IMAGE"] = benji_image
         os.environ["AGENT_PROVIDER"] = "aramb-vm"

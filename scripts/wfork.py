@@ -145,7 +145,7 @@ def run_service(cname, svc, name, image, cfg_services, envfile, project):
 
 def branch_build(svc, branch, image):
     """Build clode-stack/<svc>:<name> from the branch worktree, reusing the up build path."""
-    base = s.STACK_DIR / ".." / ("ec2-docker-mock" if svc == "ec2mock" else svc)
+    base = s.STACK_DIR / ".." / svc
     wt = s.run(["git", "-C", base, "worktree", "list", "--porcelain"],
                capture=True, check=False).stdout
     dir_, cur = None, None

@@ -47,9 +47,9 @@ if _ws is not None and hasattr(_ws, "resolve_workspaces"):
 
 # Services whose default context is NOT ../<service-name>. The compose file
 # is the source of truth for these defaults; the only current mismatch is
-# ec2mock, built from ../ec2-docker-mock.
+# mock-services, built from ./docker/mock-services (inside clode-stack).
 _WS_DEFAULT_CTX = {
-    "ec2mock": "../ec2-docker-mock",
+    "mock-services": "./docker/mock-services",
 }
 
 

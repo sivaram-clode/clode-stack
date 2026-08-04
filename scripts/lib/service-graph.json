@@ -176,7 +176,7 @@
     }
   },
 
-  "ec2mock": {
+  "mock-services": {
     "gate": "core", "buildable": true,
     "calls": {
       "jumbo": {"rw": "RW", "for": "narnia-facade: pull each deployment's config (R) + post terminal status callbacks (W)"}
@@ -208,7 +208,7 @@
     {"from": "chil",        "to": "skills-registry", "why": "SkillsRegistryClient never constructed/invoked"},
     {"from": "console-web", "to": "jumbo",           "why": "VITE_JUMBO_BASE_URL has no consumer in src; jumbo reached only via brahmi"},
     {"from": "louie",       "to": "jumbo",           "why": "JUMBO_ADDR referenced only in e2e tests; no production dial"},
-    {"from": "ec2mock",     "to": "brahmi",          "why": "inbound only: brahmi calls the ec2mock AWS API; ec2mock never dials brahmi"}
+    {"from": "mock-services", "to": "brahmi",        "why": "inbound only: brahmi calls the mock-services AWS API; mock-services never dials brahmi"}
   ],
 
   "_indirect": [

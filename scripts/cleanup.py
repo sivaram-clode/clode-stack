@@ -29,15 +29,15 @@
 #                          NOT touched here — that's --databend's job so
 #                          the meta volume can be dropped in the same step.
 #   --agents              docker rm -f every agent container + docker
-#                          volume rm every ec2mock-owned named volume.
+#                          volume rm every mock-services-owned named volume.
 #                          Container match set:
-#                            (a) label aws.mock.instance-id (ec2mock's
+#                            (a) label aws.mock.instance-id (mock-services's
 #                                aramb-vm containers, image-agnostic)
 #                            (b) ancestor ∈ {.configs[].settings.image
 #                                from data/pool-manager-svc-configs.json,
-#                                \$BENJI_IMAGE, ec2mock's live
+#                                \$BENJI_IMAGE, mock-services's live
 #                                default-image} (pool-manager LOCAL_MODE
-#                                kairos, ec2mock survivors before label
+#                                kairos, mock-services survivors before label
 #                                sweep)
 #                          Both filters scoped to network=clode.
 #                          Volume match: label aws.mock.owned=true.
@@ -215,7 +215,7 @@ def main():
 
     # Auto-couple: truncating pool-manager's DB strands every kairo container
     # it launched (its svc_deployments row is gone). Same for brahmi's DB
-    # and the aramb-vm containers that ec2mock spawned — brahmi's
+    # and the aramb-vm containers that mock-services spawned — brahmi's
     # gateway_deployments / vm_pool_slots rows tracked them and the row is
     # gone. Force the container sweep on in either case even if --agents
     # wasn't passed.
@@ -235,7 +235,7 @@ def main():
     if do_minio:
         print("  • minio: empty brahmi-attachments bucket (bucket kept; databend bucket handled by --databend)")
     if do_agents:
-        print("  • agents: docker rm -fv agent containers (by label, image, and kairo- name) + docker volume rm ec2mock-owned volumes (see --agents in help for match set)")
+        print("  • agents: docker rm -fv agent containers (by label, image, and kairo- name) + docker volume rm mock-services-owned volumes (see --agents in help for match set)")
     if reseed:
         print("  • after: scripts/seed.py")
     if DRY_RUN:
@@ -335,7 +335,7 @@ def main():
     # Every "agent" container in this stack lives outside compose:
     #   - pool-manager LOCAL_MODE spawns kairo containers via the docker
     #     socket and tracks them in pool-manager.svc_deployments.
-    #   - ec2mock spawns aramb-vm containers (name = i-<hex>) and tracks
+    #   - mock-services spawns aramb-vm containers (name = i-<hex>) and tracks
     #     them in brahmi.gateway_deployments / vm_pool_slots + labels every
     #     container with aws.mock.instance-id and every volume with
     #     aws.mock.owned=true.
@@ -344,7 +344,7 @@ def main():
     # by aws.mock.owned label. Both filters live in scripts/lib/agent_sweep.py
     # so wipe.py sees the same source of truth.
     if do_agents:
-        say("agents: containers on the `clode` network + ec2mock-owned volumes")
+        say("agents: containers on the `clode` network + mock-services-owned volumes")
         imgs = agent_sweep.agent_images()
         if imgs:
             print(f"  images: {' '.join(imgs)}")

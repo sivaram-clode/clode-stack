@@ -5,10 +5,10 @@
 #   • every clode-stack compose container + anonymous/named volume
 #   • every image referenced by a compose service (built + pulled base)
 #   • every out-of-compose agent container attached to the `clode`
-#     network (pool-manager LOCAL_MODE kairos + ec2mock aramb-vm `i-<hex>`s)
+#     network (pool-manager LOCAL_MODE kairos + mock-services aramb-vm `i-<hex>`s)
 #   • every within-network fork (clode.wfork) container + its fork-specific
 #     images (clode-stack/<svc>:<name>, clode-console-web-<name>)
-#   • every named volume ec2mock owns (label aws.mock.owned=true)
+#   • every named volume mock-services owns (label aws.mock.owned=true)
 #   • generated build-cache/*.Dockerfile + docker-compose.cache.yml
 #
 # What this PRESERVES by default:
@@ -77,7 +77,7 @@ def main():
             "==> wipe will destroy:\n"
             "    • all clode-stack containers + within-network forks (clode.wfork), volumes (named + anonymous)\n"
             "    • all images for this stack (built + pulled bases + kairo agent) + fork images\n"
-            "    • every ec2mock-owned volume (aws.mock.owned=true)\n"
+            "    • every mock-services-owned volume (aws.mock.owned=true)\n"
             "    • generated build-cache/*.Dockerfile + docker-compose.cache.yml\n"
             + ("    • the GLOBAL BuildKit cache (every project on this daemon) — because --prune-cache\n"
                if args.prune_cache
@@ -97,7 +97,7 @@ def main():
 
     # ── stage 1: release the `clode` network from non-compose containers ───
     # `docker compose down` can't drop the `clode` network while
-    # out-of-compose containers are attached. Kill the ec2mock aramb-vm and
+    # out-of-compose containers are attached. Kill the mock-services aramb-vm and
     # pool-manager LOCAL_MODE kairo classes here first via the shared lib.
     print("==> sweeping non-compose agent containers on the `clode` network")
     agent_sweep.sweep_agent_containers("1" if dry else "0")
@@ -178,11 +178,11 @@ def main():
                 else:
                     s.docker("rmi", "-f", img, capture=True, check=False)
 
-    # ── stage 4: ec2mock-owned volumes ─────────────────────────────────────
+    # ── stage 4: mock-services-owned volumes ─────────────────────────────────────
     # These are named volumes carrying $BENJI_HOME for each mock instance.
     # `--rmi all -v` catches ONLY anonymous volumes bound to compose services;
-    # the named ones ec2mock creates outside compose stay behind.
-    print(f"==> sweeping ec2mock-owned volumes (label {agent_sweep.EC2MOCK_VOLUME_LABEL})")
+    # the named ones mock-services creates outside compose stay behind.
+    print(f"==> sweeping mock-services-owned volumes (label {agent_sweep.MOCK_SERVICES_VOLUME_LABEL})")
     agent_sweep.sweep_agent_volumes("1" if dry else "0")
 
     # ── stage 5: compose-project volume stragglers ─────────────────────────

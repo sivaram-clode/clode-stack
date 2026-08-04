@@ -8,7 +8,7 @@ down` can't reach them and they linger on the `clode` bridge:
      socket. No mock labels — matched by IMAGE, and by their `kairo-`
      NAME prefix as a fallback (a rebuild leaves them on a dangling image
      id / an alternate tag that the image match misses).
-  2. ec2mock spawns aramb-vm containers named `i-<hex>` for RunInstances.
+  2. mock-services spawns aramb-vm containers named `i-<hex>` for RunInstances.
      Every container carries an `aws.mock.instance-id` label; every
      backing named volume carries `aws.mock.owned=true`. Matched by
      LABEL — image-agnostic, so it survives an image tag change.
@@ -16,13 +16,13 @@ down` can't reach them and they linger on the `clode` bridge:
 Consumers get three functions:
 
   agent_images()          -> returns deduped image list
-                             (ec2mock GET -> JSON -> $BENJI_IMAGE, in order).
+                             (mock-services GET -> JSON -> $BENJI_IMAGE, in order).
   sweep_agent_containers(dry)
                           -> docker rm -f (containers-by-label U
                              containers-by-image on the clode network).
   sweep_agent_volumes(dry)
                           -> docker volume rm on every volume labeled
-                             aws.mock.owned=true (ec2mock's per-instance
+                             aws.mock.owned=true (mock-services's per-instance
                              $BENJI_HOME volumes). Pool-manager LOCAL_MODE
                              agents don't use named volumes so nothing to
                              collect from that side.
@@ -36,9 +36,9 @@ from pathlib import Path
 
 import stacklib as s
 
-# Ports must match what compose publishes for ec2mock (see the
+# Ports must match what compose publishes for mock-services (see the
 # `ports:` block in docker-compose.yml — 8100 -> 8080).
-EC2MOCK_URL = os.environ.get("EC2MOCK_URL", "http://ec2mock.localhost:8080")
+MOCK_SERVICES_URL = os.environ.get("MOCK_SERVICES_URL", "http://mock-services.localhost:8080")
 
 # Path from the clode-stack root.
 KAIRO_CFG = os.environ.get("KAIRO_CFG", "data/pool-manager-svc-configs.json")
@@ -48,17 +48,17 @@ KAIRO_CFG = os.environ.get("KAIRO_CFG", "data/pool-manager-svc-configs.json")
 # tag.
 AGENT_NETWORK = os.environ.get("AGENT_NETWORK", "clode")
 
-# Container label ec2mock stamps on every instance it launches (mirrors
-# containerLabelInstanceID in ec2-docker-mock/internal/mock/docker.go).
-EC2MOCK_INSTANCE_LABEL = os.environ.get("EC2MOCK_INSTANCE_LABEL", "aws.mock.instance-id")
+# Container label mock-services stamps on every instance it launches (mirrors
+# containerLabelInstanceID in mock-services/internal/mock/aws/docker.go).
+MOCK_SERVICES_INSTANCE_LABEL = os.environ.get("MOCK_SERVICES_INSTANCE_LABEL", "aws.mock.instance-id")
 
-# Container label ec2mock's /narnia group stamps on every service container it
-# deploys (mirrors deploy.LabelDeployed in the ec2-docker-mock deploy package).
-EC2MOCK_DEPLOYED_LABEL = os.environ.get("EC2MOCK_DEPLOYED_LABEL", "aws.mock.deployed-service")
+# Container label mock-services's /narnia group stamps on every service container it
+# deploys (mirrors deploy.LabelDeployed in the mock-services deploy package).
+MOCK_SERVICES_DEPLOYED_LABEL = os.environ.get("MOCK_SERVICES_DEPLOYED_LABEL", "aws.mock.deployed-service")
 
-# Volume label ec2mock stamps on every named volume it creates (mirrors
+# Volume label mock-services stamps on every named volume it creates (mirrors
 # labelValueTrue + "aws.mock.owned" in ensureVolume).
-EC2MOCK_VOLUME_LABEL = os.environ.get("EC2MOCK_VOLUME_LABEL", "aws.mock.owned=true")
+MOCK_SERVICES_VOLUME_LABEL = os.environ.get("MOCK_SERVICES_VOLUME_LABEL", "aws.mock.owned=true")
 
 
 def _kairo_cfg_path() -> Path:
@@ -87,20 +87,20 @@ def agent_images():
     but all sources are unioned because different container populations
     come from different sources):
 
-      1. ec2mock GET /_admin/config/default-image  — the live image ec2mock
-         is currently launching (source of truth when ec2mock is up).
+      1. mock-services GET /_admin/config/default-image  — the live image mock-services
+         is currently launching (source of truth when mock-services is up).
       2. .configs[].settings.image in pool-manager-svc-configs.json — the
-         images pool-manager LOCAL_MODE spawns; also seeds ec2mock on boot.
+         images pool-manager LOCAL_MODE spawns; also seeds mock-services on boot.
       3. $BENJI_IMAGE — up.sh --agent exports this, overrides
          the JSON's image at seed time; kept in the union so we still match
          containers launched under it before the JSON was resyncd.
     """
     lines = []
 
-    # Live ec2mock lookup — non-fatal on connection error / non-JSON body /
+    # Live mock-services lookup — non-fatal on connection error / non-JSON body /
     # unset value. Any failure is swallowed (mirrors curl --fail piping
     # nothing into jq on connect failure / non-2xx / non-JSON).
-    data = s.get_json(f"{EC2MOCK_URL}/_admin/config/default-image", timeout=2)
+    data = s.get_json(f"{MOCK_SERVICES_URL}/_admin/config/default-image", timeout=2)
     val = data.get("default_image") if isinstance(data, dict) else None
     if val:
         lines.append(val)
@@ -133,23 +133,23 @@ def agent_images():
 
 
 def _agent_container_ids(images):
-    """Print container ids that are either labeled by ec2mock OR built from
+    """Print container ids that are either labeled by mock-services OR built from
     one of the passed images, AND attached to the clode network. The sets
     are unioned via `sort -u` because `docker ps --filter` semantics can't
     OR across filter TYPES (label OR ancestor) in a single call."""
     ids = []
 
-    # Set A: containers ec2mock owns (label-based, image-agnostic).
+    # Set A: containers mock-services owns (label-based, image-agnostic).
     ids += s.containers(
-        f"label={EC2MOCK_INSTANCE_LABEL}",
+        f"label={MOCK_SERVICES_INSTANCE_LABEL}",
         f"network={AGENT_NETWORK}",
     )
 
-    # Set A2: services deployed via ec2mock's /narnia group (label-based,
+    # Set A2: services deployed via mock-services's /narnia group (label-based,
     # image-agnostic). Separate `docker ps` because multiple `--filter label`
     # AND-combine; this OR-unions with set A via the final sort -u.
     ids += s.containers(
-        f"label={EC2MOCK_DEPLOYED_LABEL}",
+        f"label={MOCK_SERVICES_DEPLOYED_LABEL}",
         f"network={AGENT_NETWORK}",
     )
 
@@ -200,19 +200,19 @@ def sweep_agent_containers(dry="0"):
         print(f"  \033[2m$\033[0m docker rm -fv  # {len(ids)} container(s)")
         return
     # -v takes each container's ANONYMOUS volumes with it (named volumes are
-    # untouched — ec2mock's are swept by label in sweep_agent_volumes). This
+    # untouched — mock-services's are swept by label in sweep_agent_volumes). This
     # keeps a rebuild from orphaning per-container scratch volumes.
     s.docker("rm", "-fv", *ids, capture=True)
 
 
 def sweep_agent_volumes(dry="0"):
-    """Remove every named volume ec2mock owns. Volume-remove is safe here
+    """Remove every named volume mock-services owns. Volume-remove is safe here
     because sweep_agent_containers is called first by every consumer — the
     volumes are detached by the time we get here. If a volume is still in
     use, docker volume rm returns non-zero; suppress it (best-effort)
     rather than aborting the wipe."""
     r = s.docker(
-        "volume", "ls", "-q", "--filter", f"label={EC2MOCK_VOLUME_LABEL}",
+        "volume", "ls", "-q", "--filter", f"label={MOCK_SERVICES_VOLUME_LABEL}",
         capture=True, check=False,
     )
     vols = [v for v in r.stdout.splitlines() if v.strip()]
