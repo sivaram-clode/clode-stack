@@ -82,6 +82,32 @@ def _err(msg: str) -> None:
     sys.stderr.write(msg + "\n")
 
 
+# minio buckets the stack needs at boot: databend's storage engine, plus the
+# blob stores for brahmi attachments, ikki session contexts, intervix
+# recordings, and vova audio. Created here in `up` (previously a one-shot
+# `minio-setup` compose container that lingered as Exited(0)) so the list lives
+# in code and can grow bucket logic — extra buckets, policies, lifecycle rules.
+MINIO_BUCKETS = ["databend", "brahmi-attachments", "ikki-session-contexts",
+                 "intervix-recordings", "vova-audio"]
+# databend reads its bucket over an anonymous-public policy.
+MINIO_PUBLIC_BUCKETS = ["databend"]
+
+
+def ensure_minio_buckets():
+    """Bring minio up (waiting for healthy) and create the required buckets
+    BEFORE the services that need them at boot (databend et al.) start. Uses a
+    throwaway `mc` container (--rm — nothing lingers). Idempotent via
+    `mb --ignore-existing`; safe to re-run every `up`."""
+    s.log("minio: ensuring buckets (%s)" % ", ".join(MINIO_BUCKETS))
+    s.compose("up", "-d", "--wait", "minio")
+    mk = "\n".join(f"mc mb --ignore-existing local/{b}" for b in MINIO_BUCKETS)
+    pub = "\n".join(f"mc anonymous set public local/{b}" for b in MINIO_PUBLIC_BUCKETS)
+    script = ("set -e\n"
+              "mc alias set local http://minio:9000 minioadmin minioadmin\n"
+              f"{mk}\n{pub}\n")
+    s.docker("run", "--rm", "--network", s.NET, "minio/mc:latest", "sh", "-c", script)
+
+
 def parse_args(argv):
     """Parse args: --batch <N> (1..6), --profile <name> (repeatable),
     --agent, --state [tarball], and positional service names. Order-independent.
@@ -422,6 +448,12 @@ def main(argv=None):
         # uses the same tag that was just built.
         os.environ["BROWSER_IMAGE"] = browser_image
         s.log(f"pool-manager will warm aramb-browser from {browser_image}")
+
+    # Create minio buckets before the services that need them at boot start
+    # (replaces the minio-setup one-shot). Only when minio is actually in scope.
+    _minio_users = {"minio", "databend", "brahmi", "intervix", "vova", "ikki"}
+    if not services or _minio_users.intersection(services):
+        ensure_minio_buckets()
 
     s.log(f"docker compose up -d {' '.join(target_services) or '(all)'}")
     s.compose("up", "-d", *services)

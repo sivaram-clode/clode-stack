@@ -25,7 +25,6 @@ services:
   db:              {<<: *lim-db}
   redis:           {<<: *lim-cache}
   minio:           {<<: *lim-minio}
-  minio-setup:     {<<: *lim-mock}
   databend:        {<<: *lim-olap}
   traefik:         {<<: *lim-ingress}
   k3s:             {<<: *lim-k3s}

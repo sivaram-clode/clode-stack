@@ -448,30 +448,12 @@ services:
       start_period: 10s
     restart: unless-stopped
 
-  minio-setup:
-    image: minio/mc:latest
-    depends_on:
-      minio: { condition: service_healthy }
-    entrypoint:
-      - sh
-      - -c
-      - |
-        set -e
-        mc alias set local http://minio:9000 minioadmin minioadmin
-        mc mb --ignore-existing local/databend
-        mc anonymous set public local/databend
-        # brahmi attachment uploads — local-only bucket; brahmi's STORAGE_BUCKET
-        # env is overridden in the brahmi service block to point at this name.
-        mc mb --ignore-existing local/brahmi-attachments
-        # ikki session-context tarballs (per-user browser profile blobs)
-        mc mb --ignore-existing local/ikki-session-contexts
-        # intervix recordings + per-turn audit audio
-        mc mb --ignore-existing local/intervix-recordings
-        # vova per-turn voice audio audit blobs (raw deepgram input + tts output).
-        # Bucket is private; vova reads/writes via path-style with static minio creds.
-        mc mb --ignore-existing local/vova-audio
-    networks: [clode]
-    restart: "no"
+  # NOTE: minio bucket creation is no longer a one-shot compose container. It
+  # lives in scripts/up.py (ensure_minio_buckets) which brings minio up and
+  # creates the buckets via a throwaway `mc` run before the services that need
+  # them at boot (databend et al.) start — nothing lingers as Exited(0), and the
+  # bucket list/policies are in code, easy to extend. Those services now gate on
+  # `minio: service_healthy` directly.
 
   databend:
     image: datafuselabs/databend:latest
@@ -499,7 +481,7 @@ services:
       - "13307:3307"   # MySQL wire — connect DBeaver as "MySQL"
       - "18000:8000"   # HTTP handler — REST/query
     depends_on:
-      minio-setup: { condition: service_completed_successfully }
+      minio: { condition: service_healthy }
     networks: [clode]
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/v1/health"]
@@ -677,7 +659,7 @@ services:
       db: { condition: service_healthy }
       redis: { condition: service_healthy }
       raksha: { condition: service_healthy }
-      minio-setup: { condition: service_completed_successfully }
+      minio: { condition: service_healthy }
       mock-services: { condition: service_healthy }
     networks: [clode]
     healthcheck:
@@ -907,7 +889,7 @@ services:
       raksha:      { condition: service_healthy }
       brahmi:      { condition: service_healthy }
       vova:        { condition: service_healthy }
-      minio-setup: { condition: service_completed_successfully }
+      minio: { condition: service_healthy }
     networks: [clode]
     healthcheck:
       test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://127.0.0.1:8080/health || exit 1"]
@@ -973,7 +955,7 @@ services:
       redis:       { condition: service_healthy }
       raksha:      { condition: service_healthy }
       brahmi:      { condition: service_healthy }
-      minio-setup: { condition: service_completed_successfully }
+      minio: { condition: service_healthy }
     networks: [clode]
     healthcheck:
       # debian:bookworm-slim runtime (vova is the only non-alpine service
@@ -1096,7 +1078,7 @@ services:
       - traefik.http.services.ikki.loadbalancer.server.port=7602
     depends_on:
       redis: { condition: service_healthy }
-      minio-setup: { condition: service_completed_successfully }
+      minio: { condition: service_healthy }
     networks: [clode]
     healthcheck:
       test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://127.0.0.1:7602/health || exit 1"]

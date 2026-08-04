@@ -173,10 +173,15 @@ against its own DB; no separate registration step.
   worktree lacks it — Vite still exposes the `VITE_*` vars from the container
   env). The bind-mount source honors `CONSOLE_WEB_DIR` from `workspaces.yaml`
   like every other service.
-- **`minio-setup` is a one-shot init container.** `restart: "no"`; creates
-  the `databend` and `brahmi-attachments` buckets then exits. `compose ps`
-  shows `Exited (0)` — that's healthy. databend's `depends_on` uses
-  `service_completed_successfully` against it.
+- **minio buckets are created by `up.py`, not a compose container.**
+  `scripts/up.py`'s `ensure_minio_buckets()` brings minio up and creates the
+  buckets (`databend`, `brahmi-attachments`, `ikki-session-contexts`,
+  `intervix-recordings`, `vova-audio` + the databend public policy) via a
+  throwaway `mc` run **before** the services that need them at boot start —
+  nothing lingers as `Exited(0)`, and the bucket list/policies live in code
+  (`MINIO_BUCKETS`), easy to extend. databend/brahmi/intervix/vova/ikki gate on
+  `minio: service_healthy` directly. (`stack seed` alone does NOT recreate
+  buckets — that's an `up`-time concern; a `cleanup`+`up` restores them.)
 - **One redis, two logical DBs.** mang-proxy hard-fails on empty
   `REDIS_PASSWORD`, so redis runs with `--requirepass clode-redis-local`.
   mang-proxy uses DB 1; raksha + brahmi use DB 0 — keeps
