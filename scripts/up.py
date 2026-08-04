@@ -333,8 +333,8 @@ def main(argv=None):
             _err(f"error: state tarball not found: {state_tarball}")
             raise SystemExit(2)
 
-    s.log("regenerating cache-mount Dockerfiles from upstream")
-    s.run([s.REPO_DIR / "scripts" / "gen-build-cache.sh"])
+    s.log("regenerating cache-mount + image-tag overlays from upstream")
+    s.run([sys.executable, s.REPO_DIR / "scripts" / "gen-build-cache.py"])
 
     # Batched build — see the "Build concurrency" section in the module header.
     # --batch flag wins over BUILD_BATCH_SIZE env; default is 2 if neither is set.
@@ -459,11 +459,11 @@ def main(argv=None):
     s.compose("up", "-d", *services)
 
     s.log("starting per-service log tailers")
-    s.run([s.REPO_DIR / "scripts" / "tail-logs.sh", *services])
+    s.run([sys.executable, s.REPO_DIR / "scripts" / "tail-logs.py", *services])
 
     if not partial:
         s.log("running seeder")
-        s.run([s.REPO_DIR / "scripts" / "seed.sh"])
+        s.run([sys.executable, s.REPO_DIR / "scripts" / "seed.py"])
     else:
         s.log("skipping seeder (partial bring-up — run ./stack.sh seed manually if needed)")
 
