@@ -26,6 +26,7 @@ import os
 import re
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 import yaml
@@ -194,6 +195,21 @@ def fresh_db(svc, name, base_db):
     s.log(f"  db: fresh -> {new} (empty; service migrate builds schema + seed)")
 
 
+def _wait_for_table(db, table, tries=40):
+    """Poll until <db> has <table>. A forked service's migrate runs inside its
+    container, so the schema may not exist yet when we go to seed a fork DB."""
+    dbc = s.db_container()
+    for _ in range(tries):
+        out = s.docker("exec", dbc, "psql", "-U", "postgres", "-d", db, "-tAc",
+                       f"SELECT to_regclass('public.{table}')",
+                       capture=True, check=False).stdout or ""
+        if table in out:
+            return True
+        time.sleep(1)
+    s.log(f"  warn: {db}.{table} absent after {tries}s — seeding may fail")
+    return False
+
+
 def console_up(name, forked, project):
     # Tag the fork image with the fork name (never :latest); the repo already
     # carries -{name}, so wipe/prune's clode-console-web- prefix match still holds.
@@ -294,6 +310,19 @@ def cmd_up(cfg):
 
     if cfg["console"]:
         console_up(name, cfg["console"]["fork"], project)
+
+    # Fork-scoped dynamic seed. A forked pool-manager (db: fresh) migrated an
+    # EMPTY svc_configs — the image tag is dynamic, so it isn't embedded like the
+    # static seeds. Seed it here so the fork actually warms/deploys agents, using
+    # THIS fork's brahmi (pool-manager-<name>'s rewritten env injects the URL).
+    pm = cfg["services"].get("pool-manager")
+    if pm and pm["db"] == "fresh":
+        pm_db = f"pool-manager_{name}"
+        benji_img = os.environ.get("BENJI_IMAGE") or "clode-stack/benji:main"
+        _wait_for_table(pm_db, "svc_configs")
+        s.log(f"seeding forked pool-manager svc_configs -> {pm_db} (benji {benji_img})")
+        s.run([sys.executable, str(s.REPO_DIR / "scripts" / "seed.py"), "svc-configs", pm_db],
+              env={"BENJI_IMAGE": benji_img}, check=False)
 
     (STATE / f"{name}.applied.json").write_text(json.dumps(cfg, indent=2))
     print()

@@ -95,6 +95,44 @@ def psql_argv(*extra):
     ]
 
 
+def seed_pool_manager_svc_configs(db, benji_image="", browser_image=""):
+    """Upsert svc_configs from data/pool-manager-svc-configs.json into the given
+    pool-manager DB. kairo* / aramb-browser images are overridden by benji_image
+    / browser_image when set. This is the one DYNAMIC seed (the local image tag
+    is resolved at up/fork time), so it can't be embedded in a migration — it
+    lives here and is applied by both the baseline seeder (db 'pool-manager') and
+    wfork (a fork's own 'pool-manager_<name>' DB). Idempotent (ON CONFLICT)."""
+    kairo_json = s.REPO_DIR / "data" / "pool-manager-svc-configs.json"
+    with open(kairo_json) as f:
+        configs = json.load(f)["configs"]
+    for cfg in configs:
+        st = cfg["service_type"]
+        if st.startswith("kairo") and benji_image:
+            cfg["settings"]["image"] = benji_image
+        if st == "aramb-browser" and browser_image:
+            cfg["settings"]["image"] = browser_image
+        img_val = cfg["settings"].get("image")
+        say("pool-manager[%s]: %s (image=%s, hot=%s)" % (
+            db, st, "null" if img_val is None else img_val, cfg["hot_count"]))
+        s.psql(db, args=[
+            "-v", "st=%s" % st,
+            "-v", "settings=%s" % json.dumps(cfg["settings"], separators=(",", ":")),
+            "-v", "vars_json=%s" % json.dumps(cfg["vars"], separators=(",", ":")),
+            "-v", "hot=%s" % json.dumps(cfg["hot_count"]),
+            "-v", "cold=%s" % json.dumps(cfg["cold_count"]),
+            "-v", "maxc=%s" % json.dumps(cfg["max_concurrent_deployments"]),
+            "-v", "ena=%s" % json.dumps(cfg["enabled"]),
+        ], sql="""INSERT INTO svc_configs (service_type, settings, vars, config_hash, hot_count, cold_count, max_concurrent_deployments, enabled)
+VALUES (:'st', :'settings'::jsonb, :'vars_json'::jsonb, '', :hot, :cold, :maxc, :ena)
+ON CONFLICT (service_type) DO UPDATE
+  SET settings = EXCLUDED.settings, vars = EXCLUDED.vars,
+      hot_count = EXCLUDED.hot_count, cold_count = EXCLUDED.cold_count,
+      max_concurrent_deployments = EXCLUDED.max_concurrent_deployments,
+      enabled = EXCLUDED.enabled, updated_at = now();
+""")
+    ok("pool-manager svc_configs seeded (db %s)" % db)
+
+
 def main():
     # ── discovery ─────────────────────────────────────────────────────────
     # Populate three maps ONCE from the live compose project. Every gate
@@ -263,66 +301,14 @@ def main():
     # are k8s-only and pool-manager's DockerDeployer ignores them; they stay
     # in the row as-is for parity with prod.
     if in_scope("pool-manager"):
-        KAIRO_JSON = s.REPO_DIR / "data" / "pool-manager-svc-configs.json"
-        # up.sh's build flags export the tag they actually built:
-        #   --agent   → BENJI_IMAGE=clode-stack/benji:latest    (kairo* rows)
-        #   --browser → BROWSER_IMAGE=clode-stack/brave-head:latest (aramb-browser row)
-        # When set, each overrides the JSON's settings.image on its own rows so the
-        # svc_configs match the locally-built tag. Each is scoped by service_type so
-        # one build flag never clobbers the other family's image. Unset → the JSON
-        # default (already a clode-stack/* tag) wins.
-        benji_image = os.environ.get("BENJI_IMAGE", "")
-        browser_image = os.environ.get("BROWSER_IMAGE", "")
-        if benji_image:
-            say("pool-manager: overriding kairo* image with BENJI_IMAGE=%s (--agent-built)" % benji_image)
-        if browser_image:
-            say("pool-manager: overriding aramb-browser image with BROWSER_IMAGE=%s (--browser-built)" % browser_image)
-        with open(KAIRO_JSON) as f:
-            configs = json.load(f)["configs"]
-        for cfg in configs:
-            st = cfg["service_type"]
-            if st.startswith("kairo") and benji_image:
-                cfg["settings"]["image"] = benji_image
-            if st == "aramb-browser" and browser_image:
-                cfg["settings"]["image"] = browser_image
-            settings_json = json.dumps(cfg["settings"], separators=(",", ":"))
-            vars_json = json.dumps(cfg["vars"], separators=(",", ":"))
-            hot = json.dumps(cfg["hot_count"])
-            cold = json.dumps(cfg["cold_count"])
-            maxc = json.dumps(cfg["max_concurrent_deployments"])
-            ena = json.dumps(cfg["enabled"])
-            img_val = cfg["settings"].get("image")
-            img_log = "null" if img_val is None else str(img_val)
-            say("pool-manager: %s svc_configs (image=%s, hot=%s, cold=%s, max=%s)" % (st, img_log, hot, cold, maxc))
-            s.psql(
-                "pool-manager",
-                args=[
-                    "-v", "st=%s" % st,
-                    "-v", "settings=%s" % settings_json,
-                    "-v", "vars_json=%s" % vars_json,
-                    "-v", "hot=%s" % hot,
-                    "-v", "cold=%s" % cold,
-                    "-v", "maxc=%s" % maxc,
-                    "-v", "ena=%s" % ena,
-                ],
-                sql="""INSERT INTO svc_configs (service_type, settings, vars, config_hash, hot_count, cold_count, max_concurrent_deployments, enabled)
-VALUES (
-  :'st',
-  :'settings'::jsonb,
-  :'vars_json'::jsonb,
-  '',
-  :hot, :cold, :maxc, :ena
-)
-ON CONFLICT (service_type) DO UPDATE
-  SET settings = EXCLUDED.settings,
-      vars = EXCLUDED.vars,
-      hot_count = EXCLUDED.hot_count,
-      cold_count = EXCLUDED.cold_count,
-      max_concurrent_deployments = EXCLUDED.max_concurrent_deployments,
-      enabled = EXCLUDED.enabled,
-      updated_at = now();
-""")
-        ok("pool-manager seeded")
+        # BENJI_IMAGE / BROWSER_IMAGE (exported by up.py's pool-image build)
+        # override the JSON's kairo* / aramb-browser image with the locally-built
+        # tag; unset → the JSON default wins.
+        seed_pool_manager_svc_configs(
+            SVC_DB.get("pool-manager", "pool-manager"),
+            os.environ.get("BENJI_IMAGE", ""),
+            os.environ.get("BROWSER_IMAGE", ""),
+        )
     else:
         skip("pool-manager not in scope — skipping svc_configs seed")
 
@@ -440,4 +426,15 @@ ON CONFLICT (service_type) DO UPDATE
 
 
 if __name__ == "__main__":
-    main()
+    # Fork-scoped dynamic seed: `seed.py svc-configs <db>` applies ONLY the
+    # pool-manager svc_configs to <db> (a fork's fresh pool-manager_<name> DB,
+    # after its migrate builds the schema). Images from BENJI_IMAGE /
+    # BROWSER_IMAGE env. Called by wfork; the bare `seed.py` still runs main().
+    if len(sys.argv) >= 3 and sys.argv[1] == "svc-configs":
+        seed_pool_manager_svc_configs(
+            sys.argv[2],
+            os.environ.get("BENJI_IMAGE", ""),
+            os.environ.get("BROWSER_IMAGE", ""),
+        )
+    else:
+        main()
