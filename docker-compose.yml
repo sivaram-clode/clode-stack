@@ -132,9 +132,9 @@ x-service-urls: &service-urls
   # cha-ching's name for the same target (cloud-quota pushes to jumbo's
   # /internal surface; unset = client nil = "jumbo client not wired").
   JUMBO_INTERNAL_URL:         http://jumbo:8080
-  BRAHMI_URL:                 http://brahmi:9000
-  BRAHMI_BASE_URL:            http://brahmi:9000
-  BRAHMI_WS_URL:              ws://brahmi:9000
+  BRAHMI_URL:                 http://brahmi:8080
+  BRAHMI_BASE_URL:            http://brahmi:8080
+  BRAHMI_WS_URL:              ws://brahmi:8080
   POOL_MANAGER_URL:           http://pool-manager:8080
   CHACHING_URL:               http://cha-ching:8086
   # mang-proxy's name for the same target (usage-ledger POST /api/v1/usage-events
@@ -254,23 +254,24 @@ x-arambvm: &arambvm
   # (../benji/Dockerfile target benji) and sets BENJI_IMAGE so
   # AGENT_VM_IMAGE resolves to the just-built tag; without `--agent`,
   # AGENT_VM_IMAGE stays at `clode-stack/benji:latest` which the VM launch
-  # will try to pull if it isn't present locally. Set AGENT_PROVIDER=aramb
-  # in the environment to override back to the pool path.
-  AGENT_PROVIDER:              ${AGENT_PROVIDER:-aramb-vm}
+  # will try to pull if it isn't present locally. Default is the pool/pod
+  # path (pool-manager deploys the agents); set AGENT_PROVIDER=aramb-vm to
+  # use the direct-EC2 VM substrate instead.
+  AGENT_PROVIDER:              ${AGENT_PROVIDER:-aramb}
   AGENT_VM_REGION:             us-east-1
   AGENT_VM_CLODE_ENV:          local
   AGENT_VM_AMI_ID:             ami-mock-benji
   AGENT_VM_SPOT_ENABLED:       "false"
   AGENT_VM_IMAGE:              ${BENJI_IMAGE:-clode-stack/benji:latest}
   AGENT_VM_CALLHOME_SECRET:    mock-services-local-callhome-secret
-  # ../brahmi/.env sets POOL_EXTERNAL=true which routes every inbound
-  # GatewayWS through pool-manager's /verify-service. That path is wrong
-  # for VM agents (their identity is the HS256 call-home token brahmi
-  # signed itself with AGENT_VM_CALLHOME_SECRET). Turn it off so the VM
-  # handshake uses CallHomeSigner alone and doesn't try to reach
-  # pool-manager, which lives behind the `pool` profile here.
+  # POOL_EXTERNAL=true routes every inbound GatewayWS through pool-manager's
+  # /verify-service — correct for the pool/pod path (the default). For the
+  # aramb-vm substrate set this "false" so the VM handshake uses CallHomeSigner
+  # alone (its identity is the HS256 call-home token signed with
+  # AGENT_VM_CALLHOME_SECRET) instead of reaching pool-manager (which lives
+  # behind the `pool` profile here).
   POOL_EXTERNAL:               "true"
-  AGENT_VM_POOL_ENABLED:       "true"
+  AGENT_VM_POOL_ENABLED:       "false"
   AGENT_VM_POOL_DESIRED_SIZE:  "2"
   AWS_ENDPOINT_URL_EC2:        http://mock-services:8080
   AWS_ACCESS_KEY_ID:           test
@@ -641,7 +642,7 @@ services:
       <<: [*db-common, *s3-common, *redis-common, *service-urls, *admin-ids, *allowed-origins, *arambvm]
       DB_NAME: brahmi
       DB_SEARCH_PATH: public
-      PORT: 9000
+      PORT: 8080
       # Cluster identity — POD_NAME goes into brahmi:agent:<id>.pod_id,
       # CLUSTER_GRPC_ADDR is the peer-dial target other pods write there.
       POD_NAME: brahmi-1
@@ -654,7 +655,7 @@ services:
     labels:
       - traefik.enable=true
       - traefik.http.routers.brahmi.rule=Host(`brahmi.localhost`) || Host(`brahmi.srclode.online`)
-      - traefik.http.services.brahmi.loadbalancer.server.port=9000
+      - traefik.http.services.brahmi.loadbalancer.server.port=8080
     depends_on:
       db: { condition: service_healthy }
       redis: { condition: service_healthy }
@@ -663,7 +664,7 @@ services:
       mock-services: { condition: service_healthy }
     networks: [clode]
     healthcheck:
-      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://127.0.0.1:9000/health || exit 1"]
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://127.0.0.1:8080/health || exit 1"]
       interval: 60s
       timeout: 5s
       retries: 5
@@ -699,7 +700,7 @@ services:
       # BAGHIRA_BASE_URL points at the always-up mock-services /baghira group.
       BAGHIRA_BASE_URL: http://mock-services:8080/baghira
       # BRAHMI_URL / BRAHMI_BASE_URL / BRAHMI_WS_URL inherit from the
-      # *service-urls anchor (http://brahmi:9000, ws://brahmi:9000).
+      # *service-urls anchor (http://brahmi:8080, ws://brahmi:8080).
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
     extra_hosts:
@@ -736,7 +737,7 @@ services:
       ENVIRONMENT: local
       DB_NAME: chil_new
       PORT: 8080
-      BRAHMI_WS_URL: ws://brahmi:9000/api/v1/ws
+      BRAHMI_WS_URL: ws://brahmi:8080/api/v1/ws
       FRONTEND_URL: http://localhost:3000
       # chil's outward URL — slack/telegram OAuth redirects and any
       # browser-triggered callback land here. NOTE: Slack requires https
@@ -934,7 +935,7 @@ services:
       # Override prod brahmi (wss://api.clode.space/brahmi from .env.example)
       # to the in-stack brahmi. Stack-topology only — the provider allow-list
       # itself stays whatever vova's .env sets.
-      BRAHMI_WS_URL: ws://brahmi:9000
+      BRAHMI_WS_URL: ws://brahmi:8080
       # Non-empty S3_ENDPOINT flips vova into path-style AND scopes the static
       # creds to the S3 client only — Bedrock keeps the default AWS chain
       # (AWS_PROFILE / region / secrets from ../vova/.env), which is why vova
@@ -1029,8 +1030,8 @@ services:
       # Browser-session lifecycle webhook target (feat/browser-session-live-view):
       # ikki POSTs created/ready/cleanup here → brahmi relays over its WS to the
       # console browser viewer. Empty disables the notifier; this compose override
-      # wins over ../ikki/.env (BRAHMI_URL from *service-urls is http://brahmi:9000).
-      BRAHMI_INTERNAL_URL: http://brahmi:9000
+      # wins over ../ikki/.env (BRAHMI_URL from *service-urls is http://brahmi:8080).
+      BRAHMI_INTERNAL_URL: http://brahmi:8080
       ENVIRONMENT: local
       # Postgres via *db-common (glafa DB_* + HAS_DB); DB_NAME drives DB creation
       # by the seeder. RECORDING_ENABLED captures Steel recordings to S3.
@@ -1409,6 +1410,7 @@ services:
     env_file: [../skills-registry/.env]
     environment:
       <<: [*db-common, *service-urls, *admin-ids, *allowed-origins]
+      ENVIRONMENT: local
       DB_NAME: skills_registry
       PORT: 8080
       WORKERS_ENABLED: "false"

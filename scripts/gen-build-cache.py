@@ -8,17 +8,17 @@
 # generated files are not source — they're rebuilt from upstream on every
 # run, so the stack can never drift from the real Dockerfiles.
 #
-# LOCAL SEED INJECTION. Services listed in SEED_MIGRATION_DIRS with a
-# matching seeds/<svc>-seed.sql get one extra RUN injected before their
-# `go build`: it appends the seed SQL onto the LAST *.up.sql in the
-# service's migrations dir, so the seed rides the //go:embed into the
-# binary and `<svc> migrate` plants the rows on a fresh database itself —
-# before `serve`'s boot validation can crashloop (the fresh-stack
-# deadlock). No new migration version is created, so upstream numbering
-# is never disturbed; databases that already applied the last migration
-# skip it (they were seeded by scripts/seed.sh, which remains the
-# idempotent backstop for cleanup/reseed). The upstream repo's working
-# tree is never touched — the append happens inside the image build.
+# LOCAL SEED INJECTION (convention-driven, no service→dir map). Any service
+# with a matching seeds/<svc>-seed.sql gets one extra RUN injected before its
+# `go build`: it appends the seed SQL onto the LAST *.up.sql in the service's
+# migrations dir (auto-discovered — see _discover_mig_dir), so the seed rides
+# the //go:embed into the binary and `<svc> migrate` plants the rows on a fresh
+# database itself — before `serve`'s boot validation can crashloop (the
+# fresh-stack deadlock). No new migration version is created, so upstream
+# numbering is never disturbed; databases that already applied the last
+# migration skip it (scripts/seed.sh remains the idempotent backstop for
+# cleanup/reseed). The upstream repo's working tree is never touched — the
+# append happens inside the image build. Adding a seed = drop the file.
 
 import os
 import re
@@ -28,23 +28,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
 import stacklib as s
 
-# Workspace overrides: point a service's build context at a git worktree
-# instead of ../<svc>. resolve_workspaces exports <SVC>_DIR (the same var the
-# compose build.context interpolates); we read it below to find each
-# Dockerfile. Called directly here too so `./stack.sh build-cache` honors
-# workspaces.yaml even when up.sh didn't export the vars first.
-#
-# Prefer the workspaces.py module when present (the future home of the
-# resolver); otherwise fall back to the <SVC>_DIR env vars already exported
-# by up.sh via scripts/lib/workspaces.sh.
-try:
-    import workspaces as _ws  # scripts/lib/workspaces.py
-except ImportError:
-    _ws = None
-if _ws is not None and hasattr(_ws, "resolve_workspaces"):
-    # Call for its side effects: exports <SVC>_DIR (build context) and <SVC>_TAG
-    # (image tag) into the env we read below. Returns a dict, not an exit code.
-    _ws.resolve_workspaces()
+# Build context per service: the <SVC>_DIR env var if set (wfork sets it per
+# fork), else ../<svc>. The baseline always builds from main — no workspaces
+# file; <SVC>_TAG likewise defaults to 'main' unless a fork sets it.
 
 # Services whose default context is NOT ../<service-name>. The compose file
 # is the source of truth for these defaults; the only current mismatch is
@@ -62,6 +48,21 @@ def _ws_var(svc):
 # service name → default build context
 def _ws_base(svc):
     return _WS_DEFAULT_CTX.get(svc, f"../{svc}")
+
+
+def _discover_mig_dir(ctx):
+    """The migrations dir (relative to the build context) holding *.up.sql, found
+    by convention so a build-time seed needs only a seeds/<svc>-seed.sql file — no
+    hardcoded service→dir map. Prunes nested worktrees (.claude, .worktrees) and
+    vendor trees so a checkout's own worktrees don't make the match ambiguous.
+    Returns '' when there is no unique migrations dir (none, or more than one)."""
+    dirs = set()
+    for root, subs, files in os.walk(ctx):
+        subs[:] = [d for d in subs
+                   if d not in (".git", ".claude", ".worktrees", "node_modules", "vendor")]
+        if os.path.basename(root) == "migrations" and any(f.endswith(".up.sql") for f in files):
+            dirs.add(os.path.relpath(root, ctx))
+    return dirs.pop() if len(dirs) == 1 else ""
 
 
 def inject_mounts(src, dst, seed_file="", mig_dir=""):
@@ -116,9 +117,9 @@ def inject_mounts(src, dst, seed_file="", mig_dir=""):
 
 def gen_image_overlay():
     """Write docker-compose.images.yml pinning every buildable service's image to
-    <repo>:<tag> — tag = <SVC>_TAG (the workspace branch, exported by
-    resolve_workspaces) else 'main'. Never :latest, so a tag always names the
-    branch/workspace baked into the image. Covers ALL buildable services (not
+    <repo>:<tag> — tag = <SVC>_TAG (set per-fork by wfork) else 'main'. Never
+    :latest, so a tag always names the branch baked into the image. Covers ALL
+    buildable services (not
     just the cache-mount set), so COMPOSE_PROFILES is widened to see profiled
     ones too."""
     os.environ["COMPOSE_PROFILES"] = s.compose_profiles()
@@ -151,13 +152,9 @@ def main():
     SERVICES = ["raksha", "jumbo", "brahmi", "pool-manager", "chil", "cha-ching",
                 "toolkit-proxy", "mang-proxy", "skills-registry", "narnia", "narnia-workers"]
 
-    # service → migrations dir (relative to the service's build context) for
-    # local-seed injection. Add a line here + seeds/<svc>-seed.sql to give
-    # another service a build-time seed.
-    SEED_MIGRATION_DIRS = {
-        "raksha": "db/migrations",
-        "cha-ching": "internal/db/migrations",
-    }
+    # Build-time seed injection is now convention-driven: drop a
+    # seeds/<svc>-seed.sql and it's appended onto that service's last migration
+    # (dir auto-discovered), so `<svc> migrate` seeds a fresh DB itself — no map.
 
     os.makedirs(OUT_DIR, exist_ok=True)
 
@@ -176,10 +173,14 @@ def main():
             print(f"warn: {src} not found, skipping")
             continue
         seed_file = f"seeds/{svc}-seed.sql"
-        mig_dir = SEED_MIGRATION_DIRS.get(svc, "")
-        if mig_dir and os.path.isfile(seed_file):
-            inject_mounts(src, dst, seed_file, mig_dir)
-            print(f"    + {svc}: local seed appended to last migration ({seed_file})")
+        if os.path.isfile(seed_file):
+            mig_dir = _discover_mig_dir(ctx)
+            if mig_dir:
+                inject_mounts(src, dst, seed_file, mig_dir)
+                print(f"    + {svc}: seed appended to {mig_dir}/ last migration ({seed_file})")
+            else:
+                print(f"warn: {svc}: {seed_file} present but no unique migrations dir under {ctx} — seed NOT applied")
+                inject_mounts(src, dst)
         else:
             inject_mounts(src, dst)
         # dockerfile is resolved by compose RELATIVE TO the build context. With a

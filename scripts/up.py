@@ -12,21 +12,20 @@ Usage:
     ./up.py --profile voice --profile org
     ./up.py --agent                      # + build the full benji agent image (benji Dockerfile,
                                          #   target benji) and flip brahmi to aramb-vm (via mock-services).
-                                         #   Builds from the workspaces.yaml `benji:` override if set,
-                                         #   else ../benji.
+                                         #   Builds from BENJI_DIR if set, else ../benji.
     ./up.py --agent --state              # + bake <benji>/archives/benji-state.tar.gz into the agent
                                          #   image and skip the boot-time OCI state pull entirely
     ./up.py --agent --state=/path/to/state.tar.gz      # same, custom tarball
     ./up.py --state=build                # build state.tar.gz FRESH from ../benji-state +
                                          #   ../aramb-skills (benji-state/scripts/zip-and-push.sh
-                                         #   --no-push) and bake that in. Implies --agent. Both
-                                         #   source checkouts honor workspaces.yaml overrides
-                                         #   (benji-state:/aramb-skills: -> BENJI_STATE_DIR/ARAMB_SKILLS_DIR).
+                                         #   --no-push) and bake that in. Implies --agent. Sources
+                                         #   override via BENJI_STATE_DIR / ARAMB_SKILLS_DIR, else
+                                         #   ../benji-state / ../aramb-skills.
     ./up.py --browser                    # + build the brave-head browser image
                                          #   (agent-base-docker/brave-headed Dockerfile) that
                                          #   pool-manager warms as the aramb-browser pool. Builds
-                                         #   from the workspaces.yaml `agent-base-docker:` override
-                                         #   if set, else ../agent-base-docker. Pair with
+                                         #   from AGENT_BASE_DOCKER_DIR if set, else
+                                         #   ../agent-base-docker. Pair with
                                          #   `--profile browser` to bring up ikki (IKKI_CONNECT).
     ./up.py --public                     # + cloudflared edge: flips outward URLs to https://*.srclode.online
     BUILD_BATCH_SIZE=4 ./up.py           # env var still honored (--batch wins if both set)
@@ -70,7 +69,6 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
 import stacklib as s  # noqa: E402
-import workspaces  # noqa: E402
 
 
 def _abs_ctx(ctx: str) -> Path:
@@ -119,8 +117,8 @@ def ensure_minio_buckets():
 # the seeder's <override_env>. This replaces the --agent/--browser flags — the
 # JSON's `enabled` is the opt-in; the flags only FORCE a rebuild.
 def _svc_tag(svc):
-    """The image tag resolve_workspaces exported for a service (its branch), else
-    'main'. brahmi->BRAHMI_TAG, agent-base-docker->AGENT_BASE_DOCKER_TAG, …"""
+    """The image tag for a service from its <SVC>_TAG env (set per-fork by wfork),
+    else 'main'. brahmi->BRAHMI_TAG, agent-base-docker->AGENT_BASE_DOCKER_TAG, …"""
     return os.environ.get(svc.upper().replace("-", "_") + "_TAG") or "main"
 
 
@@ -134,14 +132,14 @@ POOL_BUILDS = {
         "depends": [("brahmi", "clode-brahmi")],
         "build_args": lambda: [f"BRAHMI_IMAGE=clode-brahmi:{_svc_tag('brahmi')}"],
         "tag": lambda: os.environ.get("BENJI_TAG") or "main",
-        "override_env": "BENJI_IMAGE", "provider_vm": True, "stateable": True,
+        "override_env": "BENJI_IMAGE", "stateable": True,
     },
     "clode-stack/brave-head": {
         "ctx": lambda: f"{os.environ.get('AGENT_BASE_DOCKER_DIR') or '../agent-base-docker'}/brave-headed",
         "target": None,
         "build_args": lambda: [],
         "tag": lambda: os.environ.get("AGENT_BASE_DOCKER_TAG") or "main",
-        "override_env": "BROWSER_IMAGE", "provider_vm": False, "stateable": False,
+        "override_env": "BROWSER_IMAGE", "stateable": False,
     },
 }
 
@@ -202,8 +200,6 @@ def build_pool_images(force=frozenset(), state_tarball=""):
             s.docker("build", "-t", image, sc, env={"DOCKER_BUILDKIT": "1"})
             shutil.rmtree(sc)
         os.environ[rec["override_env"]] = image
-        if rec["provider_vm"]:
-            os.environ["AGENT_PROVIDER"] = "aramb-vm"
         s.log(f"  {repo} -> {image} (svc_configs override via {rec['override_env']})")
 
 
@@ -361,29 +357,14 @@ def main(argv=None):
         partial = True
         s.log(f"partial bring-up: {' '.join(services)}")
 
-    # ── workspace overrides ────────────────────────────────────────────────
-    # clode-stack/workspaces.yaml can point selected services' BUILD CONTEXT at
-    # a git worktree instead of the main sibling repo — code from a feature
-    # branch's checkout, config (env_file) still from the main repo. resolve
-    # exports <SVC>_DIR, read by the compose build.context and gen-build-cache.
-    # The table prints here AND again at the end so it can't scroll past unseen.
-    ws = workspaces.resolve_workspaces()
-    workspaces.print_workspace_table()
-    # Hard-fail on a configured-but-missing override so a stale worktree path
-    # never silently falls back to main (the "running in circles" trap).
-    ws_bad = False
-    for svc, info in ws.items():
-        if info["status"] == "MISSING":
-            _err(f"error: workspace override '{svc}' → {info['dir']} has no Dockerfile "
-                 "(fix or remove it in workspaces.yaml)")
-            ws_bad = True
-    if ws_bad:
-        raise SystemExit(2)
+    # Baseline always builds from main — each service's build context is its main
+    # sibling checkout (../<svc>). Feature branches run as parallel forks (wfork),
+    # which set their own <SVC>_DIR per fork; the baseline never reads a
+    # workspaces file. A one-off local override is still possible with an explicit
+    # env var (e.g. BENJI_DIR=/path stack up).
 
-    # The --agent benji image builds from a workspace override too:
-    # resolve_workspaces exports BENJI_DIR when workspaces.yaml carries a
-    # `benji:` line (default ../benji). benji isn't a compose service, so this
-    # is the one place that consumes it.
+    # benji isn't a compose service; --agent builds it from BENJI_DIR (default
+    # ../benji) — the one place that consumes it.
     benji_ctx = os.environ.get("BENJI_DIR") or "../benji"
     # --state=build: assemble state.tar.gz fresh from the benji-state repo +
     # aramb-skills, instead of baking benji's committed archive. Both source
@@ -495,10 +476,6 @@ def main(argv=None):
     print()
     s.log("stack ready")
     s.compose("ps", "--format", "table {{.Service}}\t{{.Status}}")
-
-    # Re-print the override table so it lands in the final screenful, after all
-    # the build/up output has streamed past.
-    workspaces.print_workspace_table()
 
     # ── mode report ────────────────────────────────────────────────────────
     # Same discovery trick as seed.sh: what's actually running decides what

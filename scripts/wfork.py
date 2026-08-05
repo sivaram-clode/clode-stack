@@ -67,6 +67,16 @@ def load_config(path: str) -> dict:
         console = None
     elif isinstance(console, dict):
         console.setdefault("fork", list(services))
+    # agents: true — agent conversations need a pool-manager that injects the
+    # FORKED brahmi's URL into the agents it deploys. Baseline pool-manager routes
+    # them at baseline brahmi (service-graph: brahmi->pool-manager W "claim a
+    # pooled agent"; the injected BRAHMI_URL is the _indirect agent edge). So
+    # auto-fork pool-manager with its own pool state (db: fresh) when agents are
+    # requested — the env rewrite repoints its BRAHMI_URL to brahmi-<name>.
+    if raw.get("agents"):
+        if "brahmi" not in services:
+            s.die("config: agents: true requires brahmi in services (agents call home to the forked brahmi)")
+        services.setdefault("pool-manager", {"branch": None, "mirror": True, "db": "fresh", "env": {}})
     return {"name": name, "services": services, "console": console}
 
 
@@ -177,11 +187,11 @@ def fresh_db(svc, name, base_db):
     if "1" not in exists:
         s.docker("exec", dbc, "psql", "-U", "postgres", "-c",
                  f'CREATE DATABASE "{new}" TEMPLATE template0', check=False)
-    # copy baseline schema (pg_dump -s is safe against a live baseline; TEMPLATE is not)
-    dump = s.docker("exec", dbc, "pg_dump", "-s", "-U", "postgres", base_db,
-                    capture=True, check=False).stdout
-    s.docker("exec", "-i", dbc, "psql", "-U", "postgres", "-d", new, stdin=dump, check=False)
-    s.log(f"  db: fresh -> {new} (schema copied; migrations may still be needed)")
+    # Empty DB on purpose. The forked container boots `<svc> migrate && serve`,
+    # so the service's OWN migrate builds the schema and runs its appended seed
+    # (gen-build-cache injects seeds/<svc>-seed.sql onto the last migration) —
+    # migrate alone owns schema + seed, identical to a baseline first boot.
+    s.log(f"  db: fresh -> {new} (empty; service migrate builds schema + seed)")
 
 
 def console_up(name, forked, project):
