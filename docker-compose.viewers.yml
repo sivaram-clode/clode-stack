@@ -1,0 +1,38 @@
+# Standalone DB viewer — WhoDB — a run-on-demand testbed, NOT part of the stack.
+# Attaches to the running `clode` network (external) and connects to the live
+# datastores (db / redis / databend) by their in-network names, so it touches
+# nothing in docker-compose.yml and can't affect the running stack.
+#
+#   Run:   docker compose -f docker-compose.viewers.yml -p viewers up -d
+#   Open:  http://localhost:8889     (profiles below are PRE-LISTED on the login page)
+#   Stop:  docker compose -f docker-compose.viewers.yml -p viewers down
+#
+# Connections are PRE-CONFIGURED via WhoDB's native env-profile support
+# (WHODB_<TYPE>_<N> = a JSON credential), so they show up ready on the login
+# page — no manual typing. Add more with _2, _3, … (e.g. another Postgres DB).
+# Datastores are reached by IN-NETWORK name (db / redis / databend). Local-dev
+# creds only. Databend is browsed over its MySQL wire (type MySQL, port 3307).
+
+services:
+  whodb:
+    image: clidey/whodb:latest
+    ports:
+      - "8889:8080"
+    environment:
+      # Postgres — one profile per service DB (add _4, _5 … for more)
+      WHODB_POSTGRES_1: '{"alias":"pg-brahmi","host":"db","user":"postgres","password":"postgres","database":"brahmi","port":"5432"}'
+      WHODB_POSTGRES_2: '{"alias":"pg-raksha","host":"db","user":"postgres","password":"postgres","database":"raksha","port":"5432"}'
+      WHODB_POSTGRES_3: '{"alias":"pg-jumbo","host":"db","user":"postgres","password":"postgres","database":"jumbo","port":"5432"}'
+      # Redis — baseline logical DB 0 (raksha + brahmi)
+      WHODB_REDIS_1: '{"alias":"redis","host":"redis","password":"clode-redis-local","database":"0","port":"6379"}'
+      # NOTE: Databend is intentionally NOT here. WhoDB has no Databend driver;
+      # over the MySQL plugin Databend rejects prepared statements ("Prepare is
+      # not support in Databend") + `SHOW SESSION STATUS`, so introspection
+      # fails. Browse Databend with bendsql or its HTTP /v1/query (port 8000).
+    networks: [clode]
+    restart: unless-stopped
+
+networks:
+  clode:
+    external: true
+    name: clode
