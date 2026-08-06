@@ -176,6 +176,10 @@
         {
           "key": "AGENT_STATE_S3_ENABLED",
           "value": "true"
+        },
+        {
+          "key": "STATE_SNAPSHOT_INTERVAL",
+          "value": "60"
         }
       ],
       "hot_count": 1,
