@@ -96,9 +96,16 @@ func (m *Mock) handleRunInstances(c *fiber.Ctx, req *QueryRequest) error {
 		// fetches names THIS instance (the id brahmi stamped from the RunInstances
 		// response and binds the call-home against). The real link-local IMDS is
 		// unreachable from a docker container; this is the local stand-in.
-		perInstanceEnv := make(map[string]string, len(envForContainer)+1)
+		perInstanceEnv := make(map[string]string, len(envForContainer)+2)
 		maps.Copy(perInstanceEnv, envForContainer)
 		perInstanceEnv["IMDS_BASE_URL"] = imdsBaseForInstance(instanceID)
+		// LOCAL-ONLY shim: the benji entrypoint requires CODE_SERVER_PASSWORD, but
+		// brahmi's zero-secrets VM user-data deliberately no longer emits it. Provide
+		// a fixed dev value so the local agent boots (code-server is a dev iframe
+		// only; never a real secret here). Not injected if user-data already set it.
+		if _, ok := perInstanceEnv["CODE_SERVER_PASSWORD"]; !ok {
+			perInstanceEnv["CODE_SERVER_PASSWORD"] = "local-dev-code-server"
+		}
 
 		cid, err := m.runContainer(ctx, runContainerParams{
 			instanceID:         instanceID,
