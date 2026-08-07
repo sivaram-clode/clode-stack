@@ -68,17 +68,29 @@ def load_config(path: str) -> dict:
         console = None
     elif isinstance(console, dict):
         console.setdefault("fork", list(services))
-    # agents: true — agent conversations need a pool-manager that injects the
-    # FORKED brahmi's URL into the agents it deploys. Baseline pool-manager routes
-    # them at baseline brahmi (service-graph: brahmi->pool-manager W "claim a
-    # pooled agent"; the injected BRAHMI_URL is the _indirect agent edge). So
-    # auto-fork pool-manager with its own pool state (db: fresh) when agents are
-    # requested — the env rewrite repoints its BRAHMI_URL to brahmi-<name>.
-    if raw.get("agents"):
+    # Agents in a fork ride the on-demand VM substrate automatically: a forked
+    # brahmi-<name> provisions VMs on demand that call home to ITSELF (its
+    # BRAHMI_URL is rewritten below), verified against the shared mock IMDS + cert
+    # that the baseline brahmi service already mounts (run_service lifts that
+    # mount). No pool-manager fork is needed — that was the old pod path.
+    #
+    # An optional top-level `benji:` block gives the fork its OWN agent image;
+    # omit it and the fork's VMs run the baseline benji image as-is.
+    #
+    #   benji: { branch: feat/agent-change }   # build clode-stack/benji:<name>
+    #
+    benji = raw.get("benji")
+    if benji is not None:
+        if not isinstance(benji, dict) or not benji.get("branch"):
+            s.die("config: benji block needs a 'branch' (the ../benji branch to build)")
         if "brahmi" not in services:
-            s.die("config: agents: true requires brahmi in services (agents call home to the forked brahmi)")
-        services.setdefault("pool-manager", {"branch": None, "mirror": True, "db": "fresh", "env": {}})
-    return {"name": name, "services": services, "console": console}
+            s.die("config: benji requires brahmi in services (the fork's brahmi runs the agents)")
+        benji = {"branch": benji["branch"]}
+    if raw.get("agents"):
+        s.log("note: 'agents: true' is obsolete — a forked brahmi provisions on-demand VMs "
+              "on its own (no pool-manager fork). Add a `benji:` block for a fork-specific "
+              "agent image, or fork `pool-manager` explicitly for the legacy pod path.")
+    return {"name": name, "services": services, "console": console, "benji": benji}
 
 
 def load_graph():
@@ -150,14 +162,26 @@ def run_service(cname, svc, name, image, cfg_services, envfile, project):
         args += ["--cpus", str(c["cpus"])]
     if isinstance(c.get("entrypoint"), str):
         args += ["--entrypoint", c["entrypoint"]]
+    # Lift the baseline service's volume mounts so the fork sees the same host
+    # binds / named volumes (e.g. brahmi's read-only VM-identity cert dir, or a
+    # docker.sock). Without this a forked brahmi couldn't verify VM call-homes.
+    for vol in (c.get("volumes") or []):
+        if isinstance(vol, str):
+            args += ["-v", vol]
+        elif isinstance(vol, dict) and vol.get("target"):
+            src = vol.get("source")
+            spec = (f"{src}:{vol['target']}" if src else vol["target"])
+            if src and vol.get("read_only"):
+                spec += ":ro"
+            args += ["-v", spec]
     args += [image, *cmd]
     s.docker(*args, capture=True)
 
 
-def branch_build(svc, branch, image):
-    """Build clode-stack/<svc>:<name> from the branch worktree, reusing the up build path."""
-    base = s.STACK_DIR / ".." / svc
-    wt = s.run(["git", "-C", base, "worktree", "list", "--porcelain"],
+def worktree_dir(svc_base, branch):
+    """Resolve the git worktree directory checked out at <branch> under svc_base
+    (…/<svc>), or a plain <svc_base>/<branch> subdir. Returns None if not found."""
+    wt = s.run(["git", "-C", svc_base, "worktree", "list", "--porcelain"],
                capture=True, check=False).stdout
     dir_, cur = None, None
     for line in wt.splitlines():
@@ -165,8 +189,34 @@ def branch_build(svc, branch, image):
             cur = line.split(maxsplit=1)[1]
         elif line.startswith("branch ") and line.split()[1] == f"refs/heads/{branch}":
             dir_ = cur
-    if not dir_ and (base / branch).is_dir():
-        dir_ = str(base / branch)
+    if not dir_ and (Path(svc_base) / branch).is_dir():
+        dir_ = str(Path(svc_base) / branch)
+    return dir_
+
+
+def benji_build(name, branch, brahmi_image):
+    """Build clode-stack/benji:<name> from the ../benji worktree at <branch>.
+
+    benji's Dockerfile COPYs /app/kairo from a brahmi image (the BRAHMI_IMAGE
+    build-arg), so a fork that also forks brahmi bakes ITS kairo into the agent by
+    passing the fork's brahmi image; otherwise the baseline brahmi image is used.
+    The resulting tag is wired onto brahmi-<name> as AGENT_VM_IMAGE, and the mock
+    deploys exactly that image on demand (no default-image)."""
+    base = s.STACK_DIR / ".." / "benji"
+    dir_ = worktree_dir(base, branch)
+    if not dir_ or not Path(dir_, "Dockerfile").exists():
+        s.die(f"benji: no worktree/Dockerfile for branch '{branch}' under {base}")
+    image = f"clode-stack/benji:{name}"
+    s.log(f"benji: building {image} from '{branch}' (FROM {brahmi_image})")
+    s.docker("build", "-f", str(Path(dir_) / "Dockerfile"), "--target", "benji",
+             "--build-arg", f"BRAHMI_IMAGE={brahmi_image}", "-t", image, str(dir_))
+    return image
+
+
+def branch_build(svc, branch, image):
+    """Build clode-stack/<svc>:<name> from the branch worktree, reusing the up build path."""
+    base = s.STACK_DIR / ".." / svc
+    dir_ = worktree_dir(base, branch)
     if not dir_ or not Path(dir_, "Dockerfile").exists():
         s.die(f"{svc}: no worktree/Dockerfile for branch '{branch}' under {base}")
     var = svc.upper().replace("-", "_") + "_DIR"
@@ -278,16 +328,18 @@ def cmd_up(cfg):
     cfg_services, project = base["services"], base["name"]
     STATE.mkdir(exist_ok=True)
 
+    # Pass 1 — resolve/build each service image (brahmi before benji, which is
+    # built FROM it below).
+    images = {}
     for svc, m in cfg["services"].items():
         cname = f"{svc}-{name}"
         running = s.docker("ps", "-a", "--format", "{{.Names}}", capture=True).stdout.split()
         if cname in running:
             s.die(f"{cname} exists (wfork down first)")
-
         if m["branch"]:
-            image = f"clode-stack/{svc}:{name}"
-            s.log(f"{svc}: building {image} from '{m['branch']}'")
-            branch_build(svc, m["branch"], image)
+            images[svc] = f"clode-stack/{svc}:{name}"
+            s.log(f"{svc}: building {images[svc]} from '{m['branch']}'")
+            branch_build(svc, m["branch"], images[svc])
         else:
             # Mirror the baseline's versioned image (…:<branch|main>, never
             # :latest). compose config carries the resolved tag via the generated
@@ -295,16 +347,33 @@ def cmd_up(cfg):
             image = (cfg_services[svc].get("image") or "").strip() or f"{project}-{svc}:main"
             s.docker("image", "inspect", image, capture=True, check=False).returncode == 0 or \
                 s.die(f"{image} not built (run stack up {svc} first)")
+            images[svc] = image
             s.log(f"{svc}: mirror ({image})")
 
+    # Optional per-fork agent image. Built FROM the fork's brahmi image (so it
+    # carries the fork's kairo) when brahmi is forked with a branch, else the
+    # baseline brahmi image. Wired onto brahmi-<name> as AGENT_VM_IMAGE so its
+    # on-demand VMs run the fork's benji.
+    benji_image = None
+    if cfg.get("benji"):
+        bs = cfg["services"].get("brahmi") or {}
+        brahmi_img = images["brahmi"] if bs.get("branch") else \
+            ((cfg_services["brahmi"].get("image") or "").strip() or f"{project}-brahmi:main")
+        benji_image = benji_build(name, cfg["benji"]["branch"], brahmi_img)
+
+    # Pass 2 — fresh DBs, env rewrite, run.
+    for svc, m in cfg["services"].items():
+        cname = f"{svc}-{name}"
         if m["db"] == "fresh":
             base_db = (cfg_services[svc].get("environment") or {}).get("DB_NAME")
             if base_db:
                 fresh_db(svc, name, base_db)
-
-        env = build_env(svc, name, forked, m["db"], cfg_services, m["env"])
+        extra = dict(m["env"] or {})
+        if svc == "brahmi" and benji_image:
+            extra["AGENT_VM_IMAGE"] = benji_image
+        env = build_env(svc, name, forked, m["db"], cfg_services, extra)
         envfile = write_env_file(env)
-        run_service(cname, svc, name, image, cfg_services, envfile, project)
+        run_service(cname, svc, name, images[svc], cfg_services, envfile, project)
         os.unlink(envfile)
         s.log(f"  → http://{cname}.localhost:8080")
 

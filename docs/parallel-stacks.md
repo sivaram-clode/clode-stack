@@ -70,10 +70,20 @@ The default substrate is **aramb-vm**: brahmi provisions **one VM per project, o
 demand**, straight through the mock EC2 (`mock-services`) — no warm pool, no
 pool-manager. That makes agents in a fork fall out for free. A forked
 `brahmi-<name>` already carries its own `BRAHMI_URL` (rewritten to
-`http://brahmi-<name>:8080`) and its own `AGENT_VM_IMAGE`; brahmi bakes both into
-each VM's cloud-init, and the mock launches exactly that image and points its
-call-home at that brahmi. **No pool-manager fork, no `agents:` flag** — just put
-`brahmi` in the fork and its agents attach to it.
+`http://brahmi-<name>:8080`) and its own `AGENT_VM_IMAGE`; `wfork` also **lifts
+brahmi's read-only VM-identity cert mount** into the fork, so `brahmi-<name>`
+verifies its VMs' instance-identity against the same cert. brahmi bakes
+`BRAHMI_URL` + `AGENT_VM_IMAGE` into each VM's cloud-init, the mock launches
+exactly that image and points its call-home at that brahmi. **No pool-manager
+fork, no `agents:` flag** — just put `brahmi` in the fork and its agents attach to
+it. (`agents: true` is now a no-op; the old pod path is opt-in — fork
+`pool-manager` explicitly.)
+
+**Use `db: fresh` for brahmi when the fork provisions agents.** A `db: reuse`
+brahmi shares the baseline's `gateway_deployments`, so both brahmis fight over the
+same project's VM row (each skips launch on the other's `connected`/`scaling_up`
+row). `db: fresh` gives `brahmi-<name>` its own projects/deployments — its agents
+provision cleanly in isolation.
 
 Two things about the agent are **declared, never inferred** — the config states
 them, stack builds + wires them, and omitting either takes the baseline default
@@ -87,7 +97,7 @@ Omit `benji` and the fork's VMs run the baseline agent image
 ```yaml
 name: b1
 services:
-  brahmi: { branch: feat/x, db: reuse }
+  brahmi: { branch: feat/x, db: fresh }   # db: fresh so the fork owns its agent deployments
 benji:
   branch: feat/agent-change     # build clode-stack/benji:b1 from ../benji worktree feat/agent-change
 ```
