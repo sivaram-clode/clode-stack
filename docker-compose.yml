@@ -274,6 +274,11 @@ x-arambvm: &arambvm
   # off so the VM handshake needs no pool-manager (behind `pool`). No AGENT_VM_POOL_*
   # knobs: the substrate is on-demand only, brahmi's vmpool filler defaults off.
   POOL_EXTERNAL:               "false"
+  # Ephemeral-VM preview tier: a Preview chat whose agent has preview_compute
+  # mode=vm provisions an on-demand ephemeral VM (per-application) instead of a
+  # pod. PREVIEW_VM_PLAN_OPEN opens the entitlement gate locally (no cha-ching);
+  # concurrency/disk caps keep their defaults.
+  PREVIEW_VM_PLAN_OPEN:        "true"
   AWS_ENDPOINT_URL_EC2:        http://mock-services:8080
   AWS_ACCESS_KEY_ID:           test
   AWS_SECRET_ACCESS_KEY:       test
