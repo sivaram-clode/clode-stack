@@ -33,12 +33,11 @@
 #                          Container match set:
 #                            (a) label aws.mock.instance-id (mock-services's
 #                                aramb-vm containers, image-agnostic)
-#                            (b) ancestor ∈ {.configs[].settings.image
-#                                from data/pool-manager-svc-configs.json,
-#                                \$BENJI_IMAGE, mock-services's live
-#                                default-image} (pool-manager LOCAL_MODE
-#                                kairos, mock-services survivors before label
-#                                sweep)
+#                            (b) ancestor ∈ {$BENJI_IMAGE (the aramb-vm agent
+#                                image), .configs[].settings.image from
+#                                data/pool-manager-svc-configs.json} (aramb-vm
+#                                instances + pool-manager LOCAL_MODE kairos,
+#                                survivors before the label sweep)
 #                          Both filters scoped to network=clode.
 #                          Volume match: label aws.mock.owned=true.
 #   -a, --all             All of the above. Default if no source flag.

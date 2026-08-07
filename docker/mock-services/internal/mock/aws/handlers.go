@@ -3,6 +3,8 @@ package aws
 import (
 	"context"
 	"log"
+	"maps"
+	"os"
 	"strings"
 	"time"
 
@@ -12,6 +14,18 @@ import (
 // availabilityZone is a mock-static AZ returned inside <placement/>. Callers
 // that key on the AZ (rare in brahmi) get a stable value.
 const availabilityZone = "mock-1a"
+
+// imdsBaseForInstance builds the per-instance IMDS_BASE_URL kairo dials for its
+// instance-identity document. The base host defaults to the mock-services name
+// on the clode bridge; MOCK_IMDS_BASE overrides it. kairo appends
+// /latest/... so the value is the imds group prefix plus the instance id.
+func imdsBaseForInstance(instanceID string) string {
+	base := strings.TrimRight(strings.TrimSpace(os.Getenv("MOCK_IMDS_BASE")), "/")
+	if base == "" {
+		base = "http://mock-services:8080/imds"
+	}
+	return base + "/" + instanceID
+}
 
 // handleRunInstances launches one docker container per requested instance.
 // EC2 RunInstances lets you ask for MinCount..MaxCount instances in a single
@@ -36,21 +50,21 @@ func (m *Mock) handleRunInstances(c *fiber.Ctx, req *QueryRequest) error {
 		}
 	}
 
-	// Which docker image to actually run — precedence:
-	//   1. Mock's admin-configured default_image (seeded via
-	//      PUT /_admin/config/default-image). Local operator's source of
-	//      truth; wins over caller-supplied values.
-	//   2. AGENT_IMAGE parsed from cloud-init user-data (matches the real
-	//      VM path where the AMI bootstrap exports it).
-	//   3. The AMI id itself, when the caller intentionally wires ImageId
-	//      to a docker image ref (standalone testing).
+	// Deploy the INCOMING image — the one the caller asked for, no server-side
+	// substitution. brahmi's aramb-vm path bakes its AGENT_VM_IMAGE into
+	// cloud-init user-data as AGENT_IMAGE (matching the real AMI-bootstrap
+	// contract), so that is what launches. Falls back to the requested ImageId
+	// only when user-data carried none (standalone testing wiring ImageId to a
+	// docker ref). There is no admin default_image: the mock never launches an
+	// image the caller didn't specify.
 	env := parseUserData(req.get("UserData"))
-	imageToRun := m.defaultImage()
+	imageToRun := strings.TrimSpace(env["AGENT_IMAGE"])
 	if imageToRun == "" {
-		imageToRun = env["AGENT_IMAGE"]
+		imageToRun = strings.TrimSpace(imageID)
 	}
 	if imageToRun == "" {
-		imageToRun = imageID
+		return writeError(c, fiber.StatusBadRequest, "InvalidParameterValue",
+			"no image to launch: user-data AGENT_IMAGE and ImageId are both empty")
 	}
 
 	// Merge caller env into a full set exported to the container.
@@ -77,12 +91,21 @@ func (m *Mock) handleRunInstances(c *fiber.Ctx, req *QueryRequest) error {
 		volumeName := newVolumeName(instanceID)
 		launchTime := time.Now().UTC()
 
+		// Per-instance env: point kairo's IMDS_BASE_URL at this mock's imds group
+		// under a per-instance path, so the signed instance-identity document it
+		// fetches names THIS instance (the id brahmi stamped from the RunInstances
+		// response and binds the call-home against). The real link-local IMDS is
+		// unreachable from a docker container; this is the local stand-in.
+		perInstanceEnv := make(map[string]string, len(envForContainer)+1)
+		maps.Copy(perInstanceEnv, envForContainer)
+		perInstanceEnv["IMDS_BASE_URL"] = imdsBaseForInstance(instanceID)
+
 		cid, err := m.runContainer(ctx, runContainerParams{
 			instanceID:         instanceID,
 			image:              imageToRun,
 			imageID:            imageID,
 			instanceType:       instanceType,
-			envVars:            envForContainer,
+			envVars:            perInstanceEnv,
 			tags:               tags,
 			volumeName:         volumeName,
 			entrypointOverride: m.cfg.EntrypointOverride,

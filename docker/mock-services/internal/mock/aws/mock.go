@@ -1,16 +1,16 @@
 // Package aws implements the EC2-wire-to-docker translation — the `aws` API
 // group of the unified deployer. It exposes ServeEC2 (the EC2 query protocol)
-// and ServeAdmin (the /_admin control plane) for mounting under the server's
-// route groups, and shares its docker client with the narnia + baghira groups.
+// for mounting under the server's route groups, and shares its docker client
+// with the narnia + baghira groups. RunInstances launches the image the caller
+// asks for (user-data AGENT_IMAGE, else ImageId) — there is no server-side
+// default-image override.
 package aws
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/docker/docker/client"
@@ -51,27 +51,6 @@ type Mock struct {
 	docker *client.Client
 	state  *State
 	cfg    Config
-
-	// admin holds runtime-mutable knobs pushed via the /_admin/* HTTP API.
-	// Today it's just the default image; more knobs (default instance type,
-	// per-service_type overrides, etc.) can slot in without changing the
-	// endpoint shape — the caller PATCHes only what it wants to set.
-	adminMu sync.RWMutex
-	admin   adminConfig
-}
-
-// adminConfig captures runtime-mutable defaults set via the admin HTTP API.
-// Extend with more fields freely; every field is optional.
-type adminConfig struct {
-	DefaultImage string `json:"default_image,omitempty"`
-}
-
-// defaultImage returns the currently-configured default image (empty when
-// unset), used by RunInstances to override whatever the caller sent.
-func (m *Mock) defaultImage() string {
-	m.adminMu.RLock()
-	defer m.adminMu.RUnlock()
-	return m.admin.DefaultImage
 }
 
 // New wires the docker client and state. Returns an error if the docker daemon
@@ -115,14 +94,12 @@ func New(cfg Config) (*Mock, error) {
 func (m *Mock) Close() error { return m.docker.Close() }
 
 // Register mounts the aws group's routes on r: the EC2 query protocol at the
-// endpoint root (POST / and POST /aws — the SDK dials the root) and the
-// mock-only /_admin/* control plane (seed.sh uses it to sync the launch image
-// with pool-manager's svc_configs). The /health liveness probe is owned by the
-// server (internal/server), shared across every group.
+// endpoint root (POST / and POST /aws — the SDK dials the root). The /health
+// liveness probe is owned by the server (internal/server), shared across every
+// group.
 func (m *Mock) Register(r fiber.Router) {
 	r.Post("/", m.ServeEC2)
 	r.Post("/aws", m.ServeEC2)
-	r.All("/_admin/*", m.ServeAdmin)
 }
 
 // Docker returns the shared docker client so sibling API groups (narnia,
@@ -201,52 +178,4 @@ func isLifecycleAction(action string) bool {
 		return true
 	}
 	return false
-}
-
-// ServeAdmin routes the mock-only /_admin/* HTTP surface. Not part of the
-// EC2 wire protocol — used by the operator (seed.sh in clode-stack) to
-// push runtime knobs without a restart.
-//
-//	PUT /_admin/config/default-image  {"image":"<ref>"}
-//	  Sets the docker image RunInstances launches instead of whatever the
-//	  caller passed in ImageId / AGENT_IMAGE. Empty string clears the
-//	  override.
-//	GET /_admin/config/default-image
-//	  Symmetric readback of the PUT above. Returns
-//	  {"default_image": "<ref>"} with an empty string when unset. Consumed
-//	  by clode-stack's cleanup/wipe scripts as the authoritative source of
-//	  truth for "which docker image is mock-services launching right now" — they
-//	  use it to sweep every container/volume created for that image.
-//	GET /_admin/config
-//	  Returns the full adminConfig JSON. Kept as the "everything" view
-//	  once more knobs land here.
-func (m *Mock) ServeAdmin(c *fiber.Ctx) error {
-	switch {
-	case c.Method() == fiber.MethodPut && c.Path() == "/_admin/config/default-image":
-		var body struct {
-			Image string `json:"image"`
-		}
-		// json.Unmarshal over the raw body (not BodyParser) so it works
-		// regardless of the caller's Content-Type, matching the old decoder.
-		if err := json.Unmarshal(c.Body(), &body); err != nil {
-			return c.Status(fiber.StatusBadRequest).SendString("invalid JSON body: " + err.Error())
-		}
-		m.adminMu.Lock()
-		m.admin.DefaultImage = strings.TrimSpace(body.Image)
-		m.adminMu.Unlock()
-		log.Printf("aws: admin: default_image=%q", body.Image)
-		return c.JSON(map[string]string{"default_image": body.Image})
-	case c.Method() == fiber.MethodGet && c.Path() == "/_admin/config/default-image":
-		m.adminMu.RLock()
-		img := m.admin.DefaultImage
-		m.adminMu.RUnlock()
-		return c.JSON(map[string]string{"default_image": img})
-	case c.Method() == fiber.MethodGet && c.Path() == "/_admin/config":
-		m.adminMu.RLock()
-		out := m.admin
-		m.adminMu.RUnlock()
-		return c.JSON(out)
-	default:
-		return c.SendStatus(fiber.StatusNotFound)
-	}
 }
