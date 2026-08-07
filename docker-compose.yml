@@ -238,41 +238,42 @@ x-admin-ids: &admin-ids
 x-allowed-origins: &allowed-origins
   ALLOWED_ORIGINS: "http://localhost:3000,http://localhost:3001,http://localhost:5173,http://localhost:8080,http://console.localhost:8080,https://srclode.online,https://clode.space"
 
-# aramb-vm knobs routed through mock-services. Merged into both brahmi pods so
-# either can process a cloud-provision request via the VM path. AWS creds
-# are dummies — the mock ignores signatures — but the SDK's credential
-# chain still needs *something* to resolve. AGENT_VM_AMI_ID is a
-# placeholder because the mock's admin-configured default_image (seeded
-# from data/pool-manager-svc-configs.json in scripts/seed.sh) overrides
-# whatever brahmi passes in RunInstances.ImageId. AGENT_VM_IMAGE must be
-# non-empty (brahmi's vmProvisioner refuses to launch otherwise); the
-# string here is the same one the seeder pushes to the mock so the two
-# stay lockstep — if you change one, change the JSON.
+# aramb-vm knobs routed through mock-services. Merged into brahmi so it can
+# process a cloud-provision request via the VM path. AWS creds are dummies — the
+# mock ignores signatures — but the SDK's credential chain still needs *something*
+# to resolve. The substrate is pure on-demand: brahmi launches ONE VM per project
+# when work arrives (no warm pool), and the mock deploys exactly the image brahmi
+# bakes into cloud-init (AGENT_VM_IMAGE → user-data AGENT_IMAGE → the container
+# image). AGENT_VM_AMI_ID is a placeholder the SDK requires; the mock ignores it
+# in favour of AGENT_VM_IMAGE. AGENT_VM_IMAGE must be non-empty (brahmi's
+# vmProvisioner refuses to launch otherwise).
 x-arambvm: &arambvm
-  # Provider default is the VM path (aramb-vm via mock-services). up.sh's
-  # `--agent` flag additionally builds the full benji image locally
-  # (../benji/Dockerfile target benji) and sets BENJI_IMAGE so
-  # AGENT_VM_IMAGE resolves to the just-built tag; without `--agent`,
-  # AGENT_VM_IMAGE stays at `clode-stack/benji:latest` which the VM launch
-  # will try to pull if it isn't present locally. Default is the pool/pod
-  # path (pool-manager deploys the agents); set AGENT_PROVIDER=aramb-vm to
-  # use the direct-EC2 VM substrate instead.
-  AGENT_PROVIDER:              ${AGENT_PROVIDER:-aramb}
+  # Provider default is the VM path (aramb-vm via mock-services), on demand — no
+  # pool-manager, no warm VM pool. up.sh builds the benji image locally
+  # (../benji/Dockerfile target benji) and exports BENJI_IMAGE so AGENT_VM_IMAGE
+  # resolves to the just-built tag; otherwise it stays clode-stack/benji:latest
+  # (pulled if absent). Set AGENT_PROVIDER=aramb to fall back to the pool/pod path
+  # (requires the `pool` profile — pool-manager).
+  AGENT_PROVIDER:              ${AGENT_PROVIDER:-aramb-vm}
   AGENT_VM_REGION:             us-east-1
   AGENT_VM_CLODE_ENV:          local
   AGENT_VM_AMI_ID:             ami-mock-benji
   AGENT_VM_SPOT_ENABLED:       "false"
   AGENT_VM_IMAGE:              ${BENJI_IMAGE:-clode-stack/benji:latest}
-  AGENT_VM_CALLHOME_SECRET:    mock-services-local-callhome-secret
-  # POOL_EXTERNAL=true routes every inbound GatewayWS through pool-manager's
-  # /verify-service — correct for the pool/pod path (the default). For the
-  # aramb-vm substrate set this "false" so the VM handshake uses CallHomeSigner
-  # alone (its identity is the HS256 call-home token signed with
-  # AGENT_VM_CALLHOME_SECRET) instead of reaching pool-manager (which lives
-  # behind the `pool` profile here).
-  POOL_EXTERNAL:               "true"
-  AGENT_VM_POOL_ENABLED:       "false"
-  AGENT_VM_POOL_DESIRED_SIZE:  "2"
+  # VM call-home identity: the agent proves itself with an AWS-signed EC2
+  # instance-identity document (no pre-shared secret). mock-services' `imds` group
+  # GENERATES a signing keypair + self-signed cert at boot into the shared
+  # `vm-identity` volume (raksha generate-or-load style — nothing committed);
+  # brahmi mounts that volume read-only and verifies against cert.pem via
+  # AGENT_VM_IDENTITY_CERT_PATH. accountId must match AGENT_VM_AWS_ACCOUNT_ID
+  # (the mock signs with 834379228613 by default).
+  AGENT_VM_AWS_ACCOUNT_ID:     "834379228613"
+  AGENT_VM_IDENTITY_CERT_PATH: /etc/clode/vm-identity/cert.pem
+  # aramb-vm bypasses pool-manager entirely — a VM row's call-home is verified by
+  # the instance-identity path (handleVMCallHome), never /verify-service. POOL_EXTERNAL
+  # off so the VM handshake needs no pool-manager (behind `pool`). No AGENT_VM_POOL_*
+  # knobs: the substrate is on-demand only, brahmi's vmpool filler defaults off.
+  POOL_EXTERNAL:               "false"
   AWS_ENDPOINT_URL_EC2:        http://mock-services:8080
   AWS_ACCESS_KEY_ID:           test
   AWS_SECRET_ACCESS_KEY:       test
@@ -652,6 +653,14 @@ services:
       # brahmi/.env's dev value → local bucket.
       STORAGE_BUCKET:        brahmi-attachments
       STORAGE_REGION:        us-east-1
+    volumes:
+      # VM call-home instance-identity trust anchor (AGENT_VM_IDENTITY_CERT_PATH):
+      # brahmi verifies the mock IMDS's signed document against cert.pem. The
+      # SAME operator-provided dir is bind-mounted read-only into mock-services
+      # (which signs with its key.pem) and here — one source, no drift, nothing
+      # committed. Generate it once (see docs/parallel-stacks.md); *.pem is
+      # git-ignored. Absent/empty ⇒ the mock fatals at boot (local-testing only).
+      - ${VM_IDENTITY_DIR:-./.local/vm-identity}:/etc/clode/vm-identity:ro
     labels:
       - traefik.enable=true
       - traefik.http.routers.brahmi.rule=Host(`brahmi.localhost`) || Host(`brahmi.srclode.online`)
@@ -1568,9 +1577,10 @@ services:
   # IP from the mock's response and dials it — the mock returns the
   # container name, which docker's embedded DNS resolves on this network.
   #
-  # Image sync: seed.sh reads the kairo image from
-  # data/pool-manager-svc-configs.json and PUTs it to /_admin/config/default-image
-  # so the mock spawns the same container image pool-manager would.
+  # Image: the mock launches exactly the image the caller bakes into cloud-init
+  # (brahmi's AGENT_VM_IMAGE → user-data AGENT_IMAGE) — on-demand, no server-side
+  # default-image. The pod/pool path (opt-in `pool` profile) gets its image from
+  # pool-manager's svc_configs instead.
   # ------------------------------------------------------------------
   mock-services:
     build:
@@ -1603,10 +1613,18 @@ services:
       db: { condition: service_healthy }
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
+      # The `imds` group READS its signing cert.pem + key.pem from here (never
+      # generates). Same operator-provided dir brahmi mounts to verify; *.pem is
+      # git-ignored. Absent/empty ⇒ fatal at boot (local-testing signer only).
+      # Generate once (from the repo root):
+      #   mkdir -p .local/vm-identity && openssl req -x509 -newkey rsa:2048 -sha256 \
+      #     -keyout .local/vm-identity/key.pem -out .local/vm-identity/cert.pem \
+      #     -nodes -days 36500 -subj /CN=clode-mock-imds
+      - ${VM_IDENTITY_DIR:-./.local/vm-identity}:/etc/clode/vm-identity:ro
     labels:
-      # host-side hits for /_admin/* + EC2-wire smoke tests go through
-      # traefik at mock-services.localhost:8080. LOCAL-ONLY on purpose: the
-      # admin API is unauthenticated — never add a srclode rule here.
+      # host-side EC2-wire smoke tests go through traefik at
+      # mock-services.localhost:8080. LOCAL-ONLY on purpose — never add a
+      # srclode rule here.
       - traefik.enable=true
       - traefik.http.routers.mock-services.rule=Host(`mock-services.localhost`)
       - traefik.http.services.mock-services.loadbalancer.server.port=8080

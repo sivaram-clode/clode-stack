@@ -24,6 +24,7 @@ import (
 	"github.com/sivaram-clode/mock-services/internal/mock/baghira"
 	"github.com/sivaram-clode/mock-services/internal/mock/composio"
 	"github.com/sivaram-clode/mock-services/internal/mock/dbquery"
+	"github.com/sivaram-clode/mock-services/internal/mock/imds"
 	"github.com/sivaram-clode/mock-services/internal/mock/narnia"
 	"github.com/sivaram-clode/mock-services/internal/mock/oauthmock"
 )
@@ -51,6 +52,12 @@ func New(awsMock *aws.Mock, nh *narnia.Handler, bh *baghira.Handler) *fiber.App 
 	// narnia + baghira groups — native Fiber, one prefix each.
 	nh.Register(app.Group("/narnia", scoped("narnia")))
 	bh.Register(app.Group("/baghira", scoped("baghira")))
+
+	// imds group — a stand-in for AWS EC2 IMDS. aramb-vm agent containers get
+	// IMDS_BASE_URL=http://mock-services:8080/imds/<instance-id> injected by the
+	// aws group at launch, and kairo fetches its signed instance-identity document
+	// here (per-instance path → no link-local networking).
+	imds.Register(app.Group("/imds", scoped("imds")))
 
 	// composio group — a Postgres-backed mock of the Composio API for the local
 	// stack's toolkit-proxy. Self-constructing (no shared deps): it bootstraps

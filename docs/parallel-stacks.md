@@ -25,8 +25,15 @@ services:
   brahmi:        { branch: feat/x, db: reuse }   # build clode-stack/brahmi:b1 from the worktree
   aramb-gateway: { mirror: true }                # baseline :main image, run as aramb-gateway-b1
 console: true                                    # static console-web wired to the forked backends
-agents: true                                     # also fork pool-manager so agents call home to brahmi-b1
+# benji: {...}   # optional — a fork-specific agent VM image / state (see "Agents in a fork").
+                 # Omit it and the fork's agents run the baseline benji image as-is.
 ```
+
+**Everything is declared, never inferred.** The YAML states *what* the fork is
+(which services, which branches, which agent image + state); `wfork` only *builds
+and deploys* it — it holds no per-fork flags, relations, or "if agents then also…"
+logic. A key that isn't set takes the baseline default unchanged, so the smallest
+useful fork is a single `services:` entry.
 
 ```bash
 stack wfork preview --config fork.b1.yaml   # dry-run: routing + ⚠ WRITE-to-baseline warnings — RUN FIRST
@@ -57,23 +64,71 @@ stack wfork prune                           # tear down ALL forks
 - **console** (`console: true`) — a static console-web build with the forked
   backends' `VITE_*` URLs baked in, served at `console-web-<name>.localhost:8080`.
 
-## Agent conversations in a fork (`agents: true`)
+## Agents in a fork (aramb-vm, on-demand)
 
-Agents are provisioned by **pool-manager**, which bakes a *static* `BRAHMI_URL`
-into every agent it deploys — so a forked brahmi gets no agents unless
-pool-manager is *also* forked to point at it. `agents: true` handles that: it
-**auto-adds `pool-manager` to the fork** (`mirror`, `db: fresh`); the env rewrite
-repoints `pool-manager-<name>`'s `BRAHMI_URL` → `http://brahmi-<name>:8080`, so
-agents deployed in the fork call home to the fork's brahmi. It requires `brahmi`
-in the fork.
+The default substrate is **aramb-vm**: brahmi provisions **one VM per project, on
+demand**, straight through the mock EC2 (`mock-services`) — no warm pool, no
+pool-manager. That makes agents in a fork fall out for free. A forked
+`brahmi-<name>` already carries its own `BRAHMI_URL` (rewritten to
+`http://brahmi-<name>:8080`) and its own `AGENT_VM_IMAGE`; brahmi bakes both into
+each VM's cloud-init, and the mock launches exactly that image and points its
+call-home at that brahmi. **No pool-manager fork, no `agents:` flag** — just put
+`brahmi` in the fork and its agents attach to it.
 
-pool-manager's `svc_configs` (agent image + pool sizing) is the one **dynamic**
-seed — the local image tag is resolved at up-time, so it can't be embedded in a
-migration. `wfork up` therefore seeds it explicitly: after the fork is up it waits
-for `pool-manager_<name>`'s schema, then runs `seed.py svc-configs
-pool-manager_<name>` (with `BENJI_IMAGE`, default `clode-stack/benji:main`). The
-agent containers are deployed by the shared baseline mock-services/jumbo, but the
-brahmi URL rides in from `pool-manager-<name>`'s env, so they attach to the fork.
+Two things about the agent are **declared, never inferred** — the config states
+them, stack builds + wires them, and omitting either takes the baseline default
+as-is.
+
+### A fork-specific agent image — `benji.branch`
+
+Omit `benji` and the fork's VMs run the baseline agent image
+(`clode-stack/benji:latest`) unchanged. To pin the fork to its own agent image:
+
+```yaml
+name: b1
+services:
+  brahmi: { branch: feat/x, db: reuse }
+benji:
+  branch: feat/agent-change     # build clode-stack/benji:b1 from ../benji worktree feat/agent-change
+```
+
+`wfork up` builds `clode-stack/benji:b1` from that worktree and sets
+`AGENT_VM_IMAGE=clode-stack/benji:b1` on `brahmi-b1`. Because the mock deploys the
+**incoming** image (whatever brahmi bakes in — there is no server-side
+default-image), the fork's VMs run exactly `:b1` while baseline keeps running
+`:latest`. Deterministic end to end: the tag is `:<name>` (derived from the fork
+name), the build source is the declared branch — no `--agent` flag, no up-time
+image inference.
+
+### A fork-specific agent state — `benji.state`
+
+The benji-state tarball baked into the agent image is declarative too. Omit it and
+the image's built-in state flies in unchanged; declare it to bake a fork-specific
+state:
+
+```yaml
+benji:
+  branch: feat/agent-change
+  state:
+    build: true                 # build state.tar.gz from ../benji-state + ../aramb-skills, bake into clode-stack/benji:b1
+    # from: /abs/path/state.tar.gz   # …or bake a prebuilt tarball instead
+```
+
+Stack does only the mechanical build + overlay
+(`FROM clode-stack/benji:b1` → `COPY state.tar.gz …` → `ENV BENJI_STATE_PULL=false`)
+and wires the resulting tag onto `brahmi-b1`. It owns *building and deploying*, not
+the relations: the whole agent shape for a fork lives in this one block, and the
+default needs no block at all.
+
+### The legacy pod path (opt-in)
+
+The pod substrate (agents as k8s-style pods via **pool-manager**) is off by
+default — pool-manager is behind the `pool` profile. If a fork explicitly sets
+its brahmi to `AGENT_PROVIDER=aramb` (pods), it must also fork pool-manager so the
+static `BRAHMI_URL` pool-manager bakes into each agent points at the fork's brahmi,
+and seed that fork's `pool-manager_<name>` svc_configs (`seed.py svc-configs
+pool-manager_<name>`, image from `BENJI_IMAGE`). The aramb-vm default above avoids
+all of that — prefer it for forks.
 
 ## `preview` — read the consequences before `up`
 
@@ -102,8 +157,10 @@ agents). Always `preview` first.
    `cleanup` truncate, where `migrate` no-ops on the already-migrated schema).
 
 So a `db: fresh` fork of any service that has a seed file comes up fully seeded
-with no extra step. The only exception is the dynamic pool-manager svc_config,
-handled by `agents: true` above.
+with no extra step. The agent image/state a fork runs isn't seed data — it's
+declared in the `benji:` block (above) and built into the image, so it needs no
+DB seed at all. (The dynamic pool-manager svc_config only applies to the opt-in
+pod path.)
 
 ## Resource ceilings
 
@@ -112,12 +169,15 @@ handled by `agents: true` above.
 not tight packing). `up.py` applies it on every bring-up and each fork container
 inherits it; `NO_LIMITS=1` skips it.
 
-## Not built — the origin-aware router (north star)
+## No duplicate pools — solved by the on-demand VM substrate
 
-The leaner end of the dial: one shared baseline where a fork runs *only* the
-changed subtree and every other call falls through to baseline, decided
-per-request by a small router that injects the requesting branch's call-home URL
-into claimed agents (so a *single* shared pool-manager serves all forks — no
-duplicate pools). True per-request routing needs header baggage the sealed code
-can't propagate today, so `wfork` — explicit per-fork containers plus the
-`agents: true` pool-manager fork — is the model in use.
+The original worry was that per-fork agents would mean a per-fork **pool**
+(duplicate warm capacity, per-fork pool-manager) — the reason the north star was a
+per-request origin-aware router feeding a *single* shared pool. The aramb-vm
+default retires that worry: there is **no pool** to duplicate. Each fork's brahmi
+provisions VMs **on demand** and each VM call-homes to the brahmi that launched it
+(its `BRAHMI_URL` baked into cloud-init), so N forks cost nothing at rest and never
+share or contend for pool capacity. The per-request router (header baggage the
+sealed code can't propagate today) is only still relevant for the opt-in pod path;
+for the VM default, explicit per-fork `brahmi` containers already give clean
+isolation with zero standing duplication.

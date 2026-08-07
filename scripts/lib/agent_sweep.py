@@ -83,27 +83,16 @@ def _dedup(lines):
 
 def agent_images():
     """Emit the deduped set of docker image refs that back every
-    agent-class container in this stack. Precedence (first hit wins,
-    but all sources are unioned because different container populations
-    come from different sources):
+    agent-class container in this stack. All sources are unioned because
+    different container populations come from different sources:
 
-      1. mock-services GET /_admin/config/default-image  — the live image mock-services
-         is currently launching (source of truth when mock-services is up).
-      2. .configs[].settings.image in pool-manager-svc-configs.json — the
-         images pool-manager LOCAL_MODE spawns; also seeds mock-services on boot.
-      3. $BENJI_IMAGE — up.sh --agent exports this, overrides
-         the JSON's image at seed time; kept in the union so we still match
-         containers launched under it before the JSON was resyncd.
+      1. $BENJI_IMAGE — the aramb-vm agent image (up.sh exports the locally-built
+         tag; brahmi launches VMs from it on demand). Also what the pod/pool path
+         builds against.
+      2. .configs[].settings.image in pool-manager-svc-configs.json — the images
+         pool-manager LOCAL_MODE spawns for the pod/pool path.
     """
     lines = []
-
-    # Live mock-services lookup — non-fatal on connection error / non-JSON body /
-    # unset value. Any failure is swallowed (mirrors curl --fail piping
-    # nothing into jq on connect failure / non-2xx / non-JSON).
-    data = s.get_json(f"{MOCK_SERVICES_URL}/_admin/config/default-image", timeout=2)
-    val = data.get("default_image") if isinstance(data, dict) else None
-    if val:
-        lines.append(val)
 
     # .configs[].settings.image from the pool-manager svc-configs JSON.
     cfg = _kairo_cfg_path()

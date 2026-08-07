@@ -312,40 +312,10 @@ def main():
     else:
         skip("pool-manager not in scope — skipping svc_configs seed")
 
-    # ── 3b. mock-services default image ────────────────────────────────────────
-    # Push the kairo image from data/pool-manager-svc-configs.json to the
-    # mock's admin API. Same source of truth as pool-manager's svc_configs
-    # above — the two stay in lockstep because both derive from the same
-    # jq path. The mock uses this as its RunInstances default: brahmi's
-    # aramb-vm path sends a placeholder AGENT_VM_AMI_ID and the mock
-    # substitutes the real docker image at launch. Gated on mock-services being
-    # in scope, so a stack running without it just skips this step.
-    if in_scope("mock-services"):
-        KAIRO_JSON = s.REPO_DIR / "data" / "pool-manager-svc-configs.json"
-        with open(KAIRO_JSON) as f:
-            _cfgs = json.load(f)["configs"]
-        # Prefer the locally-built versioned benji tag (up.py exports BENJI_IMAGE
-        # when it builds the pool image) over the config's (now versionless) value
-        # — a versionless ref would push as :latest and never match the local build.
-        _kairo_imgs = [c["settings"].get("image") for c in _cfgs if c["service_type"] == "kairo"]
-        _cfg_img = next((str(i) for i in _kairo_imgs if i), "")
-        KAIRO_IMG = os.environ.get("BENJI_IMAGE") or _cfg_img
-        if not KAIRO_IMG:
-            warn("no kairo image found in %s — mock-services default_image not seeded" % KAIRO_JSON)
-        else:
-            say("mock-services: pushing default_image=%s" % KAIRO_IMG)
-            http, body = s.http(
-                "PUT", "%s/_admin/config/default-image" % MOCK_SERVICES_URL,
-                data=json.dumps({"image": KAIRO_IMG}),
-                headers={"Content-Type": "application/json"},
-                timeout=None,
-            )
-            if http in (200, 204):
-                ok("mock-services default_image=%s" % KAIRO_IMG)
-            else:
-                warn("mock-services PUT default-image: HTTP %s — %s" % (http, body))
-    else:
-        skip("mock-services not in scope — skipping default_image seed")
+    # aramb-vm deploys the INCOMING image on demand: brahmi bakes its
+    # AGENT_VM_IMAGE into each VM's cloud-init and the mock launches exactly that
+    # (no server-side default_image to seed anymore). The pod/pool path gets its
+    # image from svc_configs above (seeded only when pool-manager is in scope).
 
     # ── 4. skills-registry — skills import (direct DB) ────────────────────
     # Skills are parsed from ../aramb-skills and UPSERTed straight into the

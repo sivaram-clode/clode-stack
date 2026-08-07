@@ -63,7 +63,7 @@ clode-stack/
 ./stack.sh up                  # build + up + seed (idempotent) — fully local, no Cloudflare
 ./stack.sh up --public         # + cloudflared edge (webhooks, OAuth installs, external MCP clients)
 ./stack.sh up jumbo brahmi     # subset; seeder skipped on partial bring-ups
-./stack.sh up --agent          # + build the full benji agent image (../benji/Dockerfile) and flip brahmi to aramb-vm
+./stack.sh up --agent          # force-rebuild the benji agent image (../benji/Dockerfile). aramb-vm is already the default; `up` builds benji if absent, --agent rebuilds it
 ./stack.sh up --browser        # + build the brave-head browser image (../agent-base-docker/brave-headed) for the aramb-browser pool; pair with --profile browser for ikki
 ./stack.sh down                # stop; preserves volumes/images/buildkit cache
 ./stack.sh wipe                # total teardown (agents + volumes + images + buildkit) — prompts y/N
@@ -142,8 +142,10 @@ reads each container's `DB_NAME` via `docker inspect` for a `SVC_DB` map (servic
   `SVC_DB[svc]` (the reseed backstop; fresh DBs already got it via `migrate`).
 - **Dynamic seeds** (can't be a static file): explicit `if in_scope(...)` steps —
   pool-manager `svc_configs` (local image tag; also exposed as `seed.py
-  svc-configs <db>` so `wfork` seeds a forked pool-manager), mock-services
-  default-image (HTTP), skills-registry import (`../aramb-skills`).
+  svc-configs <db>` so `wfork` seeds a forked pool-manager — pod/pool path only,
+  opt-in), skills-registry import (`../aramb-skills`). The aramb-vm default needs
+  no image seed: brahmi deploys its `AGENT_VM_IMAGE` on demand and the mock
+  launches that incoming image (no server-side default-image to push).
 
 Profile flags at up-time scope what's seeded automatically (RUNNING is runtime
 state, not a compose re-render); removing/adding a service needs only a compose

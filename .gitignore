@@ -23,3 +23,6 @@ docker/console-web/*.env
 # python bytecode
 __pycache__/
 *.pyc
+
+# Operator-provided local secrets (VM instance-identity signing cert/key, etc.)
+.local/

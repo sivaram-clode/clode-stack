@@ -11,6 +11,7 @@ require (
 	github.com/mark3labs/mcp-go v0.57.0
 	github.com/opencontainers/image-spec v1.1.1
 	github.com/redis/go-redis/v9 v9.22.0
+	go.mozilla.org/pkcs7 v0.10.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 
