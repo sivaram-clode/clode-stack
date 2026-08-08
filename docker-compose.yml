@@ -91,6 +91,13 @@ x-db-common: &db-common
 x-redis-common: &redis-common
   REDIS_ADDR: redis:6379
   REDIS_PASSWORD: clode-redis-local
+  # Reserved shared cross-tenant DB index (platform-level, not per-service):
+  # cha-ching publishes billing:<orgId>:wallet here and brahmi/ikki/mang-proxy
+  # read it via internal/sharedstore, decoupled from each service's own logical
+  # DB. Locally this is the same requirepass redis on the default user; in k8s
+  # it is redis-shared DB 15 with the billing:* ACL grant. Consumers that don't
+  # use the shared store (raksha, …) simply ignore it.
+  SHARED_REDIS_DB: "15"
 
 x-databend-common: &databend-common
   DATABEND_HOST:     databend
@@ -276,9 +283,12 @@ x-arambvm: &arambvm
   POOL_EXTERNAL:               "false"
   # Ephemeral-VM preview tier: a Preview chat whose agent has preview_compute
   # mode=vm provisions an on-demand ephemeral VM (per-application) instead of a
-  # pod. PREVIEW_VM_PLAN_OPEN opens the entitlement gate locally (no cha-ching);
-  # concurrency/disk caps keep their defaults.
+  # pod. PREVIEW_VM_PLAN_OPEN opens the entitlement gate locally (no cha-ching).
+  # PREVIEW_VM_MAX_CONCURRENT raised from the default 2 so local testing isn't
+  # blocked by the per-org concurrency fence (esp. when launch-timeouts leave
+  # stale non-terminal rows occupying slots); disk cap keeps its default.
   PREVIEW_VM_PLAN_OPEN:        "true"
+  PREVIEW_VM_MAX_CONCURRENT:   "10"
   AWS_ENDPOINT_URL_EC2:        http://mock-services:8080
   AWS_ACCESS_KEY_ID:           test
   AWS_SECRET_ACCESS_KEY:       test
@@ -1195,7 +1205,7 @@ services:
     command: ["sh", "-c", "/app/cha-ching migrate && exec /app/cha-ching serve"]
     env_file: [../cha-ching/.env]
     environment:
-      <<: [*db-common, *service-urls, *admin-ids, *allowed-origins]
+      <<: [*db-common, *redis-common, *service-urls, *admin-ids, *allowed-origins]
       DB_NAME: chaching
       PORT: 8086
       BACKEND_URL: http://cha-ching:8086
