@@ -160,8 +160,19 @@ def run_service(cname, svc, name, image, cfg_services, envfile, project):
         args += ["--memory", str(c["mem_limit"])]
     if c.get("cpus"):
         args += ["--cpus", str(c["cpus"])]
-    if isinstance(c.get("entrypoint"), str):
-        args += ["--entrypoint", c["entrypoint"]]
+    # Lift the baseline entrypoint override. `docker run --entrypoint` takes a
+    # single executable, so a list form like ["sh","-c"] becomes `--entrypoint sh`
+    # with the remainder ("-c") prepended to the command args below. Without this,
+    # a service whose compose overrides entrypoint to a list (e.g. mang-proxy:
+    # ["sh","-c"]) would fall back to the image's own ENTRYPOINT and mis-parse the
+    # command string as a single argument.
+    ep = c.get("entrypoint")
+    ep_rest = []
+    if isinstance(ep, str):
+        args += ["--entrypoint", ep]
+    elif isinstance(ep, list) and ep:
+        args += ["--entrypoint", ep[0]]
+        ep_rest = ep[1:]
     # Lift the baseline service's volume mounts so the fork sees the same host
     # binds / named volumes (e.g. brahmi's read-only VM-identity cert dir, or a
     # docker.sock). Without this a forked brahmi couldn't verify VM call-homes.
@@ -174,7 +185,7 @@ def run_service(cname, svc, name, image, cfg_services, envfile, project):
             if src and vol.get("read_only"):
                 spec += ":ro"
             args += ["-v", spec]
-    args += [image, *cmd]
+    args += [image, *ep_rest, *cmd]
     s.docker(*args, capture=True)
 
 
