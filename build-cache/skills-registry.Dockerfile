@@ -1,5 +1,5 @@
 # Build stage
-FROM golang:1.24-alpine AS builder
+FROM golang:1.25-alpine AS builder
 
 # Install git and openssh-client for SSH access to private repos
 RUN apk add --no-cache git openssh-client && \

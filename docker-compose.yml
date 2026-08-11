@@ -201,7 +201,12 @@ x-admin-ids: &admin-ids
   # raksha-chaching bot — cha-ching's outbound SA tokens (cap pushes to
   # mang-proxy, usage reads from ikki) are caller-attributed to
   # CHACHING_ADMIN_USER_ID, so its id must pass the user.id gate.
-  ADMIN_USER_IDS:         "b2290247-c2af-44c0-9b2d-1e5c5a6a4894,0d44278f-d900-4b9d-bdc2-a8a64e91d422"
+  ADMIN_USER_IDS:         &admin-user-ids "b2290247-c2af-44c0-9b2d-1e5c5a6a4894,0d44278f-d900-4b9d-bdc2-a8a64e91d422"
+  # brahmi gates /admin/billing/* on its own BILLING_ADMIN_USER_IDS knob (not
+  # ADMIN_USER_IDS); reuse the same allowlist so cha-ching's wallet-block
+  # cleanup fan-out (SA token = the chaching bot) passes. mang-proxy + ikki
+  # already gate billing on ADMIN_USER_IDS above.
+  BILLING_ADMIN_USER_IDS: *admin-user-ids
   # organization_id gates (org-pivot). skills-registry takes exactly one
   # org (ADMIN_ORG_ID); cha-ching takes a CSV allowlist (ADMIN_ORG_IDS)
   # that must contain CHACHING_ADMIN_ORG_ID — raksha's org-intake /
@@ -629,6 +634,55 @@ services:
     depends_on:
       db: { condition: service_healthy }
       raksha: { condition: service_healthy }
+    networks: [clode]
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://127.0.0.1:8080/health || exit 1"]
+      interval: 60s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+
+  # ------------------------------------------------------------------
+  # akela — secrets management service (no DB). Stores each service's
+  # secret as one JSON blob in the configured backend. Here
+  # SECRET_PROVIDER=infisical, so akela reads/writes the local-dev
+  # Infisical project; its credentials come from ../akela/.env.
+  #
+  # NOTE: the build context points at the feat/infisical-provider worktree
+  # because the Infisical provider is not yet merged to akela main. Once it
+  # merges, set AKELA_DIR=../akela (or change the default below) so the
+  # baseline builds from main like every other service.
+  # ------------------------------------------------------------------
+  akela:
+    build:
+      context: ${AKELA_DIR:-../akela}
+      ssh: [default]
+    # akela's binary needs the `serve` subcommand; the image's default CMD is
+    # bare `./akela` (prints usage), so it is overridden here.
+    command: ["/app/akela", "serve"]
+    # env_file supplies akela's framework config + the Infisical credentials
+    # (INFISICAL_*). The *service-urls / *allowed-origins anchors below override
+    # the .env's localhost-pointing AUTH_ISSUER / JUMBO_URL for in-stack routing.
+    env_file: [../akela/.env]
+    environment:
+      <<: [*service-urls, *allowed-origins]
+      HOST: 0.0.0.0
+      PORT: 8080
+      HAS_DB: "false"
+      SECRET_PREFIX: aramb-workloads
+      SECRET_PROVIDER: infisical
+      # akela's config loader reads AWS_REGION unconditionally (glafa's GetEnv
+      # fatals on an empty value) even though the Infisical provider never uses
+      # it — set a placeholder so boot succeeds.
+      AWS_REGION: us-east-1
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.akela.rule=Host(`akela.localhost`) || Host(`akela.srclode.online`)
+      - traefik.http.services.akela.loadbalancer.server.port=8080
+    depends_on:
+      raksha: { condition: service_healthy }
+      jumbo: { condition: service_healthy }
     networks: [clode]
     healthcheck:
       test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://127.0.0.1:8080/health || exit 1"]
@@ -1076,7 +1130,7 @@ services:
       REDIS_KEY_PREFIX: "ikki:"
       # Steel-only — every other provider off. ikki/.env keeps DOCKER+LOUIE on
       # for its e2e compose; we force them off here.
-      STEEL_ENABLED: "false"
+      STEEL_ENABLED: "true"
       DOCKER_PROVIDER_ENABLED: "false"
       LOUIE_ENABLED: "false"
       HARBOR_ENABLED: "false"
@@ -1209,6 +1263,13 @@ services:
       DB_NAME: chaching
       PORT: 8086
       BACKEND_URL: http://cha-ching:8086
+      # Wallet-block cleanup-dispatch fan-out: on an org going broke the notifier
+      # POSTs /admin/billing/{block,unblock} to each recipient (teardown-only;
+      # gating itself is the shared billing key). wfork rewrites these peer hosts
+      # to the forked recipients. Recipient internal ports: mang-proxy/brahmi 8080,
+      # ikki 7602.
+      WALLET_BLOCK_RECIPIENTS: "mang-proxy=http://mang-proxy:8080,brahmi=http://brahmi:8080,ikki=http://ikki:7602"
+      WALLET_BLOCK_RECONCILE_INTERVAL: "10s"
     labels:
       - traefik.enable=true
       - traefik.http.routers.cha-ching.rule=Host(`cha-ching.localhost`) || Host(`cha-ching.srclode.online`)
@@ -1390,7 +1451,12 @@ services:
     # Idempotent in effect (round-robin tolerates dupes); use
     # `mang-proxy load-keys --disable <provider>` to clear if you want a
     # single clean entry per provider.
-    command: ["/app/mang-proxy migrate || true; /app/mang-proxy load-keys --platform || true; exec /app/mang-proxy serve"]
+    # A second `--envKeyPrefix=K2_` batch sources K2_ANTHROPIC_API_KEY /
+    # K2_OPENAI_API_KEY / K2_CLAUDE_CODE_OAUTH_TOKEN / K2_CODEX_OAUTH_TOKEN
+    # (one extra key per provider that sets them), added to the same per-provider
+    # round-robin pools. Unset K2_* vars are skipped, so this is a no-op until
+    # you populate them in ../mang-proxy/.env.
+    command: ["/app/mang-proxy migrate || true; /app/mang-proxy load-keys --platform || true; /app/mang-proxy load-keys --platform --envKeyPrefix=K2_ || true; exec /app/mang-proxy serve"]
     env_file: [../mang-proxy/.env]
     environment:
       <<: [*redis-common, *service-urls, *admin-ids, *databend-common]
