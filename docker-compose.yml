@@ -271,7 +271,7 @@ x-arambvm: &arambvm
   AGENT_VM_CLODE_ENV:          local
   AGENT_VM_AMI_ID:             ami-mock-benji
   AGENT_VM_SPOT_ENABLED:       "false"
-  AGENT_VM_IMAGE:              ${BENJI_IMAGE:-clode-stack/benji:latest}
+  AGENT_VM_IMAGE:              ${BENJI_IMAGE:-clode-stack/benji:main}
   # VM call-home identity: the agent proves itself with an AWS-signed EC2
   # instance-identity document (no pre-shared secret). mock-services' `imds` group
   # GENERATES a signing keypair + self-signed cert at boot into the shared
