@@ -14,6 +14,11 @@
 #                          config: runs <svc>-<name> on the clode network at
 #                          <svc>-<name>.localhost:8080, peers env-rewritten to the
 #                          fork, DB reuse|fresh. `prune` tears down ALL forks.
+#   update|latest [scope...]  switch each service checkout to `main` + fast-forward
+#                          to the remote. scope = compose profile(s) and/or service
+#                          name(s); none = every buildable service + agent/state
+#                          sibling repos. Per-repo: dirty tree / no main / diverged
+#                          history is LOGGED and SKIPPED, never fatal. -n = dry-run.
 #   graph                 print the service relation map (A -> B = A calls B)
 #   resolve <svc...>|--workspace <f>   wake-closure + connecting/in-between nodes
 #   check <svc...>        pre-flight: is the set dependency-closed? (names dropped nodes)
@@ -42,6 +47,7 @@ shift || true
 
 case "$cmd" in
   up)          exec python3 scripts/up.py       "$@" ;;
+  update|latest) exec python3 scripts/update.py "$@" ;;  # svc checkouts -> latest main
   wfork)       exec python3 scripts/wfork.py "$@" ;;   # preview|up|down|ls, all --config driven
   graph)       exec scripts/lib/depgraph.py graph   "$@" ;;
   resolve)     exec scripts/lib/depgraph.py resolve "$@" ;;

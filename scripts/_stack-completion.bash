@@ -28,7 +28,7 @@ _stack_complete() {
     cword=$COMP_CWORD
   }
 
-  local subcmds="up down wipe cleanup reseed seed tail-logs build-cache help"
+  local subcmds="up update latest down wipe cleanup reseed seed tail-logs build-cache help"
   local sub="${words[1]:-}"
 
   # Subcommand position.
@@ -87,7 +87,7 @@ _stack_complete() {
   local cleanup_flags="--postgres --redis --redis-mang --databend --minio --agents -a --all --reseed -n --dry-run -y --yes -h --help"
 
   case "$sub" in
-    up|tail-logs|logs)
+    up|update|latest|tail-logs|logs)
       local profiles_list
       profiles_list="$(__stack_profiles)"
 
@@ -115,9 +115,12 @@ _stack_complete() {
         return
       fi
       # Flags this subcommand accepts (tail-logs ignores the build/mode ones,
-      # but offering them is harmless — up.sh is the real parser).
+      # but offering them is harmless — the .py is the real parser).
       if [[ "$cur" == -* ]]; then
-        COMPREPLY=( $(compgen -W "--batch --profile --public --agent --browser --state" -- "$cur") )
+        local _flags="--batch --profile --public --agent --browser --state"
+        [[ "$sub" == update || "$sub" == latest ]] && \
+          _flags="--profile --branch --remote --jobs -j --no-fetch --dry-run -n"
+        COMPREPLY=( $(compgen -W "$_flags" -- "$cur") )
         return
       fi
       # Otherwise positional args are service names; allow repeats.
