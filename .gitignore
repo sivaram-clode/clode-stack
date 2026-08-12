@@ -3,16 +3,23 @@
 workspaces.yaml
 workspaces.yml
 
+# Local-only `wfork` configs (fork.<name>.yaml) — per-experiment feature-branch
+# fork definitions, not shared source. Keep a fork.example.yaml if one is added.
+fork.*.yaml
+!fork.example.yaml
+
 # Local secrets — never committed.
 keys/
 
 # Rolling per-service container logs — runtime output, not source.
 logs/
 
-# Generated compose overlays — regenerated on every `stack up` by
-# scripts/gen-build-cache.py. Generated artifacts, not source.
+# Generated compose overlays + cache-mount Dockerfiles — regenerated on every
+# `stack up` by scripts/gen-build-cache.py (each file is marked AUTO-GENERATED).
+# Generated artifacts, not source.
 docker-compose.cache.yml
 docker-compose.images.yml
+build-cache/
 
 # generated per-clone compose overlays (stack fork)
 .forks/
