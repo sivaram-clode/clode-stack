@@ -66,7 +66,8 @@ clode-stack/
 ./stack.sh up --agent          # force-rebuild the benji agent image (../benji/Dockerfile). aramb-vm is already the default; `up` builds benji if absent, --agent rebuilds it
 ./stack.sh up --browser        # + build the brave-head browser image (../agent-base-docker/brave-headed) for the aramb-browser pool; pair with --profile browser for ikki
 ./stack.sh down                # stop; preserves volumes/images/buildkit cache
-./stack.sh wipe                # total teardown (agents + volumes + images + buildkit) — prompts y/N
+./stack.sh wipe                # total teardown (agents + volumes + images) — prompts y/N
+./stack.sh wipe --keep-pulled  # same, but KEEP all images (fast re-up; still drops volumes → clean data)
 ./stack.sh cleanup             # truncate data in place — see `stack.sh cleanup -h`
 ./stack.sh reseed              # cleanup -a -y --reseed (data reset + fresh seed)
 ./stack.sh seed                # re-run seed against a running stack

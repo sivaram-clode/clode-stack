@@ -168,7 +168,7 @@ raksha for JWT mint) are explicit: `if in_scope skills-registry && in_scope raks
 |---|---|
 | `./stack.sh up [svc...]` | Build (batched — default 2 parallel, `--batch N` up to 6) + `compose up -d` + tail logs + seed. With a service subset, seeder is skipped. |
 | `./stack.sh down` | `compose down`; preserves volumes. |
-| `./stack.sh wipe [--yes\|-y]` | `compose down -v` + drop images + prune BuildKit cache + `docker rm -f` kairo-pmlocal-* agents. Prompts unless `-y`. |
+| `./stack.sh wipe [--yes\|-y] [--keep-pulled] [--prune-cache]` | `compose down -v` + drop images + `docker rm -f` kairo-pmlocal-* agents. `--keep-pulled` keeps all images (fast re-up; volumes still dropped). BuildKit cache kept unless `--prune-cache`. Prompts unless `-y`. |
 | `./stack.sh seed` | Re-run the idempotent post-boot seeder. |
 | `./stack.sh cleanup [flags]` | Truncate data in place without dropping volumes. See `./stack.sh cleanup -h` for the full source/modifier matrix (`--postgres`, `--redis`, `--redis-mang`, `--databend`, `--pmlocal`, `--reseed`, `--dry-run`). |
 | `./stack.sh tail-logs [svc...]` | (Re-)start per-service log tailers into `./logs/service/`. |

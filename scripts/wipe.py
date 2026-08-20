@@ -4,10 +4,12 @@
 # What this drops:
 #   • every clode-stack compose container + anonymous/named volume
 #   • every image referenced by a compose service (built + pulled base)
+#     — SKIPPED with --keep-pulled (images stay so the next `up` needn't re-pull/rebuild)
 #   • every out-of-compose agent container attached to the `clode`
 #     network (pool-manager LOCAL_MODE kairos + mock-services aramb-vm `i-<hex>`s)
 #   • every within-network fork (clode.wfork) container + its fork-specific
 #     images (clode-stack/<svc>:<name>, clode-console-web-<name>)
+#     — the fork IMAGES are kept with --keep-pulled (the containers still go)
 #   • every named volume mock-services owns (label aws.mock.owned=true)
 #   • generated build-cache/*.Dockerfile + docker-compose.{cache,images}.yml
 #
@@ -21,6 +23,11 @@
 # Flags:
 #   -y, --yes      Skip the confirmation prompt (CI or scripted teardown).
 #   -n, --dry-run  Print every command that would run; touch nothing.
+#   --keep-pulled  KEEP all Docker images — pulled bases (postgres, redis, minio,
+#                  databend, …), built service images, and the kairo/benji agent
+#                  tiers — so the next `up` skips the re-download + rebuild. Still
+#                  removes containers, ALL volumes (clean data), and build
+#                  artifacts; this is a fast data-clean teardown, not a full nuke.
 #   --prune-cache  ALSO prune the global BuildKit cache (slow next rebuild).
 #   -h, --help     This message.
 
@@ -62,6 +69,11 @@ def main():
     # BuildKit cache is KEPT by default (fast rebuilds; the prune is global and
     # hits every project). Opt in with --prune-cache for the rare deep clean.
     parser.add_argument("--prune-cache", dest="prune_cache", action="store_true")
+    # Images are DROPPED by default (full nuke). Opt in with --keep-pulled to
+    # keep every image (pulled bases + built + agent tiers) so the next `up`
+    # skips the re-download/rebuild — the teardown still drops containers and
+    # ALL volumes, so you get clean data without the slow image reacquire.
+    parser.add_argument("--keep-pulled", dest="keep_pulled", action="store_true")
     args = parser.parse_args()
 
     if args.help:
@@ -76,8 +88,10 @@ def main():
         print(
             "==> wipe will destroy:\n"
             "    • all clode-stack containers + within-network forks (clode.wfork), volumes (named + anonymous)\n"
-            "    • all images for this stack (built + pulled bases + kairo agent) + fork images\n"
-            "    • every mock-services-owned volume (aws.mock.owned=true)\n"
+            + ("    • images are KEPT (pulled bases + built + kairo/benji + fork) — because --keep-pulled\n"
+               if args.keep_pulled
+               else "    • all images for this stack (built + pulled bases + kairo agent) + fork images\n")
+            + "    • every mock-services-owned volume (aws.mock.owned=true)\n"
             "    • generated build-cache/*.Dockerfile + docker-compose.{cache,images}.yml\n"
             + ("    • the GLOBAL BuildKit cache (every project on this daemon) — because --prune-cache\n"
                if args.prune_cache
@@ -115,6 +129,10 @@ def main():
         fork_imgs = sorted({i for i in imgs
                             if i.startswith("clode-console-web-")
                             or (i.startswith("clode-stack/") and i.rsplit(":", 1)[-1] not in _tiers)})
+        # --keep-pulled keeps every image (incl. these fork builds) — drop only
+        # the containers so a re-`up` of the fork needn't rebuild.
+        if args.keep_pulled:
+            fork_imgs = []
         print(f"==> removing {len(fork_ids)} within-network fork container(s) (clode.wfork)")
         if dry:
             print(f"  \033[2m$\033[0m docker rm -f  # {len(fork_ids)} fork container(s)")
@@ -145,21 +163,26 @@ def main():
             else:
                 s.docker("rm", "-f", *netleft, capture=True)
 
-    # ── stage 2: compose down --rmi all -v ─────────────────────────────────
+    # ── stage 2: compose down [--rmi all] -v ───────────────────────────────
     # --rmi all drops every image referenced by a service in the compose file
     # (both locally built `clode-*` and pulled bases like postgres, redis,
-    # minio, databend, cloudflared, mc).
-    print("==> docker compose down --rmi all -v --remove-orphans")
+    # minio, databend, cloudflared, mc). --keep-pulled omits --rmi so those
+    # images survive; -v still drops the volumes (clean data), so the next `up`
+    # recreates containers from the kept images without re-pull/rebuild.
+    rmi = [] if args.keep_pulled else ["--rmi", "all"]
+    pretty = " ".join(["docker compose down", *rmi, "-v --remove-orphans"])
+    print(f"==> {pretty}")
     if dry:
-        print("  \033[2m$\033[0m docker compose down --rmi all -v --remove-orphans")
+        print(f"  \033[2m$\033[0m {pretty}")
     else:
-        s.compose("down", "--rmi", "all", "-v", "--remove-orphans")
+        s.compose("down", *rmi, "-v", "--remove-orphans")
 
     # ── stage 3: kairo agent image(s) — not declared as compose services ───
     # Pool-manager pulls them at runtime; `--rmi all` doesn't reach them.
     # Read every image tag from the svc_configs blob and drop each explicitly.
+    # --keep-pulled keeps them too (they're the heaviest pulls of all).
     kairo_cfg = s.REPO_DIR / "data" / "pool-manager-svc-configs.json"
-    if kairo_cfg.is_file():
+    if kairo_cfg.is_file() and not args.keep_pulled:
         try:
             data = json.loads(kairo_cfg.read_text())
         except Exception:
