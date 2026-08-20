@@ -137,8 +137,9 @@ _stack_complete() {
       COMPREPLY=()
       ;;
     wipe)
-      # --yes/-y skips the confirmation prompt; --dry-run/-n previews only.
-      COMPREPLY=( $(compgen -W "--yes -y --dry-run -n --help -h" -- "$cur") )
+      # --yes/-y skips the confirmation prompt; --dry-run/-n previews only;
+      # --keep-pulled keeps all images; --prune-cache also clears BuildKit cache.
+      COMPREPLY=( $(compgen -W "--yes -y --dry-run -n --keep-pulled --prune-cache --help -h" -- "$cur") )
       ;;
     reseed)
       # reseed forwards flags to cleanup.sh (already has -y --reseed set).

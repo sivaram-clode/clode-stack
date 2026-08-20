@@ -28,9 +28,12 @@
 #   cleanup [flags]       truncate DATA in place; keep schema/containers/images
 #                          (per-source flags — see `stack.sh cleanup -h`)
 #   reseed [flags]        cleanup -a -y then re-seed (fast clean-data loop)
-#   wipe [-y] [--prune-cache]  remove containers + volumes + images + agents +
-#                          forks. KEEPS the BuildKit cache (fast rebuild) unless
-#                          --prune-cache (global). prompts y/N by default
+#   wipe [-y] [--keep-pulled] [--prune-cache]  remove containers + volumes +
+#                          images + agents + forks. --keep-pulled KEEPS all images
+#                          (pulled bases + built + agent tiers) for a fast re-`up`
+#                          (still drops volumes → clean data). KEEPS the BuildKit
+#                          cache (fast rebuild) unless --prune-cache (global).
+#                          prompts y/N by default
 #
 #   seed                  run the idempotent post-boot seeder against a running stack
 #   tail-logs [svc...]    (re-)start per-service log tailers into ./logs/service/
