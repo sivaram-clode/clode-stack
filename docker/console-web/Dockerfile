@@ -30,6 +30,9 @@ ARG VITE_CHACHING_BASE_URL=http://cha-ching.localhost:8080/api/v1
 ARG VITE_TOOLKIT_PROXY_BASE_URL=http://toolkit-proxy.localhost:8080/api/v1
 ARG VITE_SKILLS_REGISTRY_BASE_URL=http://skills-registry.localhost:8080
 ARG VITE_IKKI_BASE_URL=http://ikki.localhost:8080
+# akela (external-MCP secret vault) — new backend for feat/mcp-servers-tab; wfork
+# rewrites this to the fork's akela via its VITE_VAR map.
+ARG VITE_AKELA_BASE_URL=http://akela.localhost:8080
 ARG VITE_DEV_JWT=1
 RUN { \
       echo "VITE_GATEWAY_BASE_URL=$VITE_GATEWAY_BASE_URL"; \
@@ -40,6 +43,7 @@ RUN { \
       echo "VITE_TOOLKIT_PROXY_BASE_URL=$VITE_TOOLKIT_PROXY_BASE_URL"; \
       echo "VITE_SKILLS_REGISTRY_BASE_URL=$VITE_SKILLS_REGISTRY_BASE_URL"; \
       echo "VITE_IKKI_BASE_URL=$VITE_IKKI_BASE_URL"; \
+      echo "VITE_AKELA_BASE_URL=$VITE_AKELA_BASE_URL"; \
       echo "VITE_DEV_JWT=$VITE_DEV_JWT"; \
     } > .env.production
 

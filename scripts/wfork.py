@@ -43,6 +43,7 @@ VITE_VAR = {
     "brahmi": "VITE_BRAHMI_BASE_URL", "jumbo": "VITE_JUMBO_BASE_URL",
     "cha-ching": "VITE_CHACHING_BASE_URL", "toolkit-proxy": "VITE_TOOLKIT_PROXY_BASE_URL",
     "skills-registry": "VITE_SKILLS_REGISTRY_BASE_URL", "ikki": "VITE_IKKI_BASE_URL",
+    "akela": "VITE_AKELA_BASE_URL",
 }
 VITE_SUFFIX = {"jumbo": "/api/v1", "cha-ching": "/api/v1", "toolkit-proxy": "/api/v1"}
 

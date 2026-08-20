@@ -1316,6 +1316,12 @@ services:
       # HMAC key signing opaque agentId handles — gateway-internal (no
       # other service verifies them), any stable local value works.
       AGENTID_SIGNING_KEY: local-agentid-signing-key
+      # Live browser viewer relay: the gateway proxies the console's viewer
+      # WS to ikki's screencast socket (ikki serves /viewer/<id>/ws at its
+      # root HTTP port). Unset ⇒ the /v1/browser/viewer endpoint fails closed
+      # with 501, so the CDP-stream viewer can't connect — set it so the
+      # in-house (aramb-browser / docker) live view works end to end.
+      IKKI_WS_URL: ws://ikki:7602
     labels:
       - traefik.enable=true
       - traefik.http.routers.aramb-gateway.rule=Host(`aramb-gateway.localhost`) || Host(`aramb-gateway.srclode.online`)
@@ -1354,6 +1360,11 @@ services:
       # it overrides env_file — connections + tools work end-to-end with no real
       # Composio key or browser OAuth. github still routes through gitana.
       COMPOSIO_BASE_URL: http://mock-services:8080/composio
+      # External-MCP feature (feat/external-mcp-passthrough): tp resolves external
+      # secrets from akela's value GET, forwarding the CALLER's token (no static
+      # service token). Additive — baseline/main tp ignores it. In a fork,
+      # AKELA_BASE_URL rewrites akela -> akela-<fork>.
+      AKELA_BASE_URL: http://akela:8080
     labels:
       - traefik.enable=true
       - traefik.http.routers.toolkit-proxy.rule=Host(`toolkit-proxy.localhost`) || Host(`toolkit-proxy.srclode.online`)
