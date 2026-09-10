@@ -19,6 +19,27 @@
 tunnel: cf6cb58d-b43b-4e84-9c68-cf14652c9fc4
 credentials-file: /secrets/cf6cb58d-b43b-4e84-9c68-cf14652c9fc4.json
 
+# Edge transport: force TCP-based HTTP/2 instead of the default QUIC/UDP. QUIC
+# over UDP is unreliable in this environment — cloudflared logs "failed to accept
+# QUIC stream: timeout: no recent network activity" and resets the edge
+# connection every ~2-3 min. Every reset severs the long-lived tunneled
+# WebSockets riding it, notably the Plivo <Stream> media socket, which dropped
+# each voice call at ~2m27s (Plivo then re-fetched the answer URL). HTTP/2 rides
+# TCP and keeps the edge link stable for the full call.
+protocol: http2
+
+# Reconnect fast on any transient edge hiccup rather than tearing streams.
+retries: 20
+
+# cloudflared -> traefik (origin) leg: never idle-close or cap a long-lived
+# media WebSocket. connectTimeout bounds the dial; the keepAlive knobs keep the
+# upstream connection pool warm and open for the whole call.
+originRequest:
+  connectTimeout: 30s
+  tcpKeepAlive: 30s
+  keepAliveTimeout: 5m
+  keepAliveConnections: 100
+
 ingress:
   - hostname: "*.srclode.online"
     service: http://traefik:8080
