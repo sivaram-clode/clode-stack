@@ -79,7 +79,7 @@ max 6).
 ## Guides
 
 - [docs/adding-a-service.md](./docs/adding-a-service.md) — onboarding a sibling repo (compose block + optional `seeds/<svc>-seed.sql`; nothing else).
-- [docs/parallel-stacks.md](./docs/parallel-stacks.md) — `wfork`: run a feature branch alongside baseline (agents included). Baseline always builds from `main`.
+- [docs/parallel-stacks.md](./docs/parallel-stacks.md) — `wfork`: run a feature branch alongside baseline (agents included). Baseline always builds from `main`. **`wfork up` rebuilds an existing fork in place and preserves its `db:fresh` data** — re-run to iterate, no `down` first; `--fresh-db` wipes the fork DBs, `--public` publishes it at `https://<cname>.srclode.online`, and `wfork down` is the destructive teardown.
 - [docs/cloudflared-setup.md](./docs/cloudflared-setup.md) — creating / rotating the Cloudflare tunnel.
 
 ## Automated UI testing — oauth-mock lets a browser sign in

@@ -339,7 +339,7 @@ def cmd_preview(cfg):
     print("\nreviewed? then: wfork up")
 
 
-def cmd_up(cfg):
+def cmd_up(cfg, fresh_db_wipe=False):
     name, forked = cfg["name"], list(cfg["services"])
     if not re.match(r"^[a-z0-9][a-z0-9-]*$", name):
         s.die("name must be [a-z0-9-]")
@@ -350,6 +350,22 @@ def cmd_up(cfg):
     cfg_services, project = base["services"], base["name"]
     STATE.mkdir(exist_ok=True)
 
+    # Rebuild in place: if this fork already exists, replace its containers but
+    # KEEP its data — fresh_db is create-if-absent, so db:fresh DBs survive. So
+    # `wfork up` is idempotent/re-runnable (no `wfork down` first). Pass
+    # --fresh-db to also wipe the fork's db:fresh DBs. (`wfork down` stays the
+    # destructive teardown.)
+    existing = s.docker("ps", "-aq", "--filter", f"label=clode.fork={name}",
+                        capture=True).stdout.split()
+    if existing or (STATE / f"{name}.applied.json").exists():
+        if fresh_db_wipe:
+            drop_fresh_dbs(name, cfg, cfg_services)
+        if existing:
+            s.log(f"rebuilding fork '{name}' — replacing {len(existing)} container(s)"
+                  + ("; db:fresh DATA WIPED (--fresh-db)" if fresh_db_wipe
+                     else "; db:fresh data preserved (--fresh-db to wipe)"))
+            s.docker("rm", "-f", *existing, capture=True)
+
     # Pass 1 — resolve/build each service image (brahmi before benji, which is
     # built FROM it below).
     images = {}
@@ -357,7 +373,7 @@ def cmd_up(cfg):
         cname = f"{svc}-{name}"
         running = s.docker("ps", "-a", "--format", "{{.Names}}", capture=True).stdout.split()
         if cname in running:
-            s.die(f"{cname} exists (wfork down first)")
+            s.die(f"{cname} exists but isn't part of fork '{name}' — remove it first")
         if m["branch"]:
             images[svc] = f"clode-stack/{svc}:{name}"
             s.log(f"{svc}: building {images[svc]} from '{m['branch']}'")
@@ -417,7 +433,23 @@ def cmd_up(cfg):
 
     (STATE / f"{name}.applied.json").write_text(json.dumps(cfg, indent=2))
     print()
-    s.log(f"fork '{name}' up. down: wfork down --config <file> (or: wfork down {name})")
+    s.log(f"fork '{name}' up. rebuild: re-run `wfork up` (data preserved). down: wfork down {name}")
+
+
+def drop_fresh_dbs(name, cfg, services):
+    """DROP the fork's db:fresh databases (<base_db>_<name>). Shared by `down`
+    (teardown) and `up --fresh-db` (explicit rebuild-with-wipe). Requires
+    COMPOSE_PROFILES to be set so `services` carries the profile-gated DB_NAMEs."""
+    fresh = [svc for svc, m in cfg["services"].items() if m["db"] == "fresh"]
+    if not fresh:
+        return
+    dbc = s.db_container()
+    for svc in fresh:
+        base_db = (services.get(svc, {}).get("environment") or {}).get("DB_NAME")
+        if base_db:
+            s.docker("exec", dbc, "psql", "-U", "postgres", "-c",
+                     f'DROP DATABASE IF EXISTS "{base_db}_{name}"', check=False)
+            s.log(f"  dropped db {base_db}_{name}")
 
 
 def cmd_down(name):
@@ -428,15 +460,8 @@ def cmd_down(name):
     applied = STATE / f"{name}.applied.json"
     if applied.exists():
         cfg = json.loads(applied.read_text())
-        fresh = [svc for svc, m in cfg["services"].items() if m["db"] == "fresh"]
-        if fresh:
-            os.environ["COMPOSE_PROFILES"] = s.compose_profiles()
-            dbc, services = s.db_container(), s.compose_config()["services"]
-            for svc in fresh:
-                base_db = (services.get(svc, {}).get("environment") or {}).get("DB_NAME")
-                if base_db:
-                    s.docker("exec", dbc, "psql", "-U", "postgres", "-c",
-                             f'DROP DATABASE IF EXISTS "{base_db}_{name}"', check=False)
+        os.environ["COMPOSE_PROFILES"] = s.compose_profiles()
+        drop_fresh_dbs(name, cfg, s.compose_config()["services"])
         applied.unlink()
     s.log(f"fork '{name}' down")
 
@@ -474,6 +499,12 @@ def main():
     for c in ("preview", "up", "down"):
         p = sub.add_parser(c)
         p.add_argument("--config", help="fork.<name>.yaml")
+        if c in ("preview", "up"):
+            p.add_argument("--public", action="store_true",
+                           help="publish the fork at https://<cname>.srclode.online (sets STACK_TUNNEL_DOMAIN)")
+        if c == "up":
+            p.add_argument("--fresh-db", action="store_true",
+                           help="on rebuild, DROP+recreate the fork's db:fresh DBs (default: preserve data)")
         if c == "down":
             p.add_argument("name", nargs="?", help="fork name (alternative to --config)")
     sub.add_parser("ls")
@@ -490,7 +521,13 @@ def main():
     a.config or s.die(f"{a.cmd}: requires --config <file>")
     Path(a.config).exists() or s.die(f"config not found: {a.config}")
     cfg = load_config(a.config)
-    (cmd_preview if a.cmd == "preview" else cmd_up)(cfg)
+    if getattr(a, "public", False):
+        os.environ.setdefault("STACK_TUNNEL_DOMAIN", "srclode.online")
+        os.environ.setdefault("STACK_SCHEME", "https")
+    if a.cmd == "preview":
+        cmd_preview(cfg)
+    else:
+        cmd_up(cfg, fresh_db_wipe=getattr(a, "fresh_db", False))
 
 
 if __name__ == "__main__":
