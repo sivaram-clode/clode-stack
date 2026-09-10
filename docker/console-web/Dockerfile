@@ -33,6 +33,12 @@ ARG VITE_IKKI_BASE_URL=http://ikki.localhost:8080
 # akela (external-MCP secret vault) — new backend for feat/mcp-servers-tab; wfork
 # rewrites this to the fork's akela via its VITE_VAR map.
 ARG VITE_AKELA_BASE_URL=http://akela.localhost:8080
+# chil (Slack per-agent app deploy) — new backend for feat/channels-slack-deploy.
+# Base ends in /api/v1 (chil serves there); the console's chil-client is absolute.
+ARG VITE_CHIL_BASE_URL=http://chil.localhost:8080/api/v1
+# vova (voice) — called DIRECTLY by the console for phone-number management
+# (feat/plivo-inbound-stream). Host-browser reachable via traefik.
+ARG VITE_VOVA_URL=http://vova.localhost:8080
 ARG VITE_DEV_JWT=1
 RUN { \
       echo "VITE_GATEWAY_BASE_URL=$VITE_GATEWAY_BASE_URL"; \
@@ -44,6 +50,8 @@ RUN { \
       echo "VITE_SKILLS_REGISTRY_BASE_URL=$VITE_SKILLS_REGISTRY_BASE_URL"; \
       echo "VITE_IKKI_BASE_URL=$VITE_IKKI_BASE_URL"; \
       echo "VITE_AKELA_BASE_URL=$VITE_AKELA_BASE_URL"; \
+      echo "VITE_CHIL_BASE_URL=$VITE_CHIL_BASE_URL"; \
+      echo "VITE_VOVA_URL=$VITE_VOVA_URL"; \
       echo "VITE_DEV_JWT=$VITE_DEV_JWT"; \
     } > .env.production
 

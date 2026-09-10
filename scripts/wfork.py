@@ -43,7 +43,7 @@ VITE_VAR = {
     "brahmi": "VITE_BRAHMI_BASE_URL", "jumbo": "VITE_JUMBO_BASE_URL",
     "cha-ching": "VITE_CHACHING_BASE_URL", "toolkit-proxy": "VITE_TOOLKIT_PROXY_BASE_URL",
     "skills-registry": "VITE_SKILLS_REGISTRY_BASE_URL", "ikki": "VITE_IKKI_BASE_URL",
-    "akela": "VITE_AKELA_BASE_URL",
+    "akela": "VITE_AKELA_BASE_URL", "vova": "VITE_VOVA_URL",
 }
 VITE_SUFFIX = {"jumbo": "/api/v1", "cha-ching": "/api/v1", "toolkit-proxy": "/api/v1"}
 
@@ -216,12 +216,17 @@ def worktree_dir(svc_base, branch):
     return dir_
 
 
-def benji_build(name, branch, brahmi_image):
+def benji_build(name, branch, brahmi_image, vova_image=None):
     """Build clode-stack/benji:<name> from the ../benji worktree at <branch>.
 
     benji's Dockerfile COPYs /app/kairo from a brahmi image (the BRAHMI_IMAGE
     build-arg), so a fork that also forks brahmi bakes ITS kairo into the agent by
     passing the fork's brahmi image; otherwise the baseline brahmi image is used.
+    A voice-delegate branch ALSO COPYs /app/vova-client (+ onnxruntime + EOU
+    model) from a vova image (the VOVA_IMAGE build-arg); pass the fork's vova
+    image when the fork carries a vova branch so benji bakes THAT vova-client,
+    else the Dockerfile default (vova:main) is used — which has no vova-client, so
+    a benji block that needs the bake MUST fork vova too.
     The resulting tag is wired onto brahmi-<name> as AGENT_VM_IMAGE, and the mock
     deploys exactly that image on demand (no default-image)."""
     base = s.STACK_DIR / ".." / "benji"
@@ -229,9 +234,14 @@ def benji_build(name, branch, brahmi_image):
     if not dir_ or not Path(dir_, "Dockerfile").exists():
         s.die(f"benji: no worktree/Dockerfile for branch '{branch}' under {base}")
     image = f"clode-stack/benji:{name}"
-    s.log(f"benji: building {image} from '{branch}' (FROM {brahmi_image})")
-    s.docker("build", "-f", str(Path(dir_) / "Dockerfile"), "--target", "benji",
-             "--build-arg", f"BRAHMI_IMAGE={brahmi_image}", "-t", image, str(dir_))
+    s.log(f"benji: building {image} from '{branch}' (FROM {brahmi_image}"
+          + (f", vova {vova_image}" if vova_image else "") + ")")
+    args = ["build", "-f", str(Path(dir_) / "Dockerfile"), "--target", "benji",
+            "--build-arg", f"BRAHMI_IMAGE={brahmi_image}"]
+    if vova_image:
+        args += ["--build-arg", f"VOVA_IMAGE={vova_image}"]
+    args += ["-t", image, str(dir_)]
+    s.docker(*args)
     return image
 
 
@@ -397,7 +407,11 @@ def cmd_up(cfg, fresh_db_wipe=False):
         bs = cfg["services"].get("brahmi") or {}
         brahmi_img = images["brahmi"] if bs.get("branch") else \
             ((cfg_services["brahmi"].get("image") or "").strip() or f"{project}-brahmi:main")
-        benji_image = benji_build(name, cfg["benji"]["branch"], brahmi_img)
+        # A forked vova (branch) publishes /app/vova-client in its image; bake it
+        # into the agent so kairo can exec the per-agent voice subprocess.
+        vs = cfg["services"].get("vova") or {}
+        vova_img = images.get("vova") if vs.get("branch") else None
+        benji_image = benji_build(name, cfg["benji"]["branch"], brahmi_img, vova_img)
 
     # Pass 2 — fresh DBs, env rewrite, run.
     for svc, m in cfg["services"].items():
@@ -409,6 +423,14 @@ def cmd_up(cfg, fresh_db_wipe=False):
         extra = dict(m["env"] or {})
         if svc == "brahmi" and benji_image:
             extra["AGENT_VM_IMAGE"] = benji_image
+        # When the console is forked, its origin (console-web-<name>.localhost:8080)
+        # must be allowed by every forked backend that validates Origin (glafa CORS),
+        # else the browser blocks the cross-origin call. Append it to the baseline
+        # ALLOWED_ORIGINS unless the fork config already set one explicitly.
+        if cfg["console"] and "ALLOWED_ORIGINS" not in extra:
+            base_ao = (cfg_services[svc].get("environment") or {}).get("ALLOWED_ORIGINS")
+            if base_ao:
+                extra["ALLOWED_ORIGINS"] = f"{base_ao},http://console-web-{name}.localhost:8080"
         env = build_env(svc, name, forked, m["db"], cfg_services, extra)
         envfile = write_env_file(env)
         run_service(cname, svc, name, images[svc], cfg_services, envfile, project)
