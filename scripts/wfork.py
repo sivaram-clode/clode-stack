@@ -157,6 +157,16 @@ def run_service(cname, svc, name, image, cfg_services, envfile, project):
         "--label", f"traefik.http.services.{cname}.loadbalancer.server.port={lb_port(c)}",
         "--env-file", envfile,
     ]
+    # Under --public (STACK_TUNNEL_DOMAIN set), also publish the fork at
+    # <cname>.<tunnel-domain> so cloudflared's wildcard (*.<domain> -> traefik)
+    # reaches it by Host — baseline services carry this rule, but a fork otherwise
+    # gets a .localhost router only.
+    tunnel = os.environ.get("STACK_TUNNEL_DOMAIN", "").strip()
+    if tunnel:
+        args += [
+            "--label", f"traefik.http.routers.{cname}-pub.rule=Host(`{cname}.{tunnel}`)",
+            "--label", f"traefik.http.routers.{cname}-pub.service={cname}",
+        ]
     if c.get("mem_limit"):
         args += ["--memory", str(c["mem_limit"])]
     if c.get("cpus"):
