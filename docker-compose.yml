@@ -248,7 +248,7 @@ x-admin-ids: &admin-ids
 # With `https://srclode.online` in the list, Hostname() == "srclode.online",
 # which then suffix-matches every `*.srclode.online` subdomain.
 x-allowed-origins: &allowed-origins
-  ALLOWED_ORIGINS: "http://localhost:3000,http://localhost:3001,http://localhost:5173,http://localhost:8080,http://console.localhost:8080,https://srclode.online,https://clode.space"
+  ALLOWED_ORIGINS: "http://localhost:3000,http://localhost:3001,http://localhost:5173,http://localhost:8080,http://console.localhost:8080,https://srclode.online,https://clode.space,http://vova.srclode.online,https://vova.srclode.online"
 
 # aramb-vm knobs routed through mock-services. Merged into brahmi so it can
 # process a cloud-provision request via the VM path. AWS creds are dummies — the
@@ -568,7 +568,7 @@ services:
       # (not noreply.clode.io like dev), so we use the matching From here.
       # Dev/prod deploys use EMAIL_FROM_* directly since notify's key there
       # has noreply.clode.io verified.
-      EMAIL_DELIVERY_METHOD: NOTIFY
+      EMAIL_DELIVERY_METHOD: API
       NOTIFY_FROM_NAME: "Clode No-Reply"
       NOTIFY_FROM_EMAIL: notify@send.srclode.online
     labels:
@@ -646,8 +646,11 @@ services:
   # ------------------------------------------------------------------
   # akela — secrets management service (no DB). Stores each service's
   # secret as one JSON blob in the configured backend. Here
-  # SECRET_PROVIDER=infisical, so akela reads/writes the local-dev
+  # VAULT_PROVIDER=infisical, so akela reads/writes the local-dev
   # Infisical project; its credentials come from ../akela/.env.
+  # (akela's config loader keys off VAULT_PROVIDER / VAULT_PREFIX — the
+  # older SECRET_* names are ignored and leave the provider defaulting to
+  # aws, which then times out on EC2 IMDS for every secret op.)
   #
   # NOTE: the build context points at the feat/infisical-provider worktree
   # because the Infisical provider is not yet merged to akela main. Once it
@@ -670,8 +673,8 @@ services:
       HOST: 0.0.0.0
       PORT: 8080
       HAS_DB: "false"
-      SECRET_PREFIX: aramb-workloads
-      SECRET_PROVIDER: infisical
+      VAULT_PREFIX: aramb-workloads
+      VAULT_PROVIDER: infisical
       # akela's config loader reads AWS_REGION unconditionally (glafa's GetEnv
       # fatals on an empty value) even though the Infisical provider never uses
       # it — set a placeholder so boot succeeds.
@@ -722,6 +725,13 @@ services:
       # brahmi/.env's dev value → local bucket.
       STORAGE_BUCKET:        brahmi-attachments
       STORAGE_REGION:        us-east-1
+      # Internal akela MCP endpoint — lets brahmi front akela's vault under the
+      # unified aramb_mcp surface (aramb_mcp.vault_*). Cluster DNS; brahmi resolves it.
+      AKELA_MCP_URL:         http://akela:8080/api/v1/mcp
+      # Voice backend — brahmi proxies the TTS voice catalog (GET /api/v1/voices)
+      # and recordings to vova. Without this, the console voice picker shows
+      # "No voices available" (brahmi short-circuits to an empty list).
+      VOVA_URL:              http://vova:8080
     volumes:
       # VM call-home instance-identity trust anchor (AGENT_VM_IDENTITY_CERT_PATH):
       # brahmi verifies the mock IMDS's signed document against cert.pem. The
@@ -1144,6 +1154,11 @@ services:
       # ikki.localhost routes via traefik from host AND containers (alias),
       # so agent-side and desktop CDP clients share one URL.
       CDP_BASE_URL: ws://ikki.localhost:8080
+      # The connect-back URL handed to the MCP/agent. ikki/.env defaults this to
+      # ws://localhost:7602, which is unreachable from inside a container (each
+      # container has its own loopback; 7602 isn't published to the host either).
+      # Override with the traefik alias so the benji agent VM can dial it too.
+      CDP_PUBLIC_BASE_URL: ws://ikki.localhost:8080
       # S3 endpoint + creds come from *s3-common (traefik minio origin, so the
       # presigned recording GET URLs ikki mints resolve from the host browser).
       # STORAGE_BUCKET/REGION are ikki's per-service overrides: the bucket holds
@@ -1355,10 +1370,9 @@ services:
       ENVIRONMENT: local
       HAS_DB: "true"
       DB_NAME: toolkit_proxy
-      # Point Composio at the local mock (the composio group in mock-services) instead
-      # of the real backend.composio.dev in ../toolkit-proxy/.env. Inline here so
-      # it overrides env_file — connections + tools work end-to-end with no real
-      # Composio key or browser OAuth. github still routes through gitana.
+      # MOCKED Composio: toolkit-proxy talks to the local mock-services
+      # /composio group (6 toolkits, state in PG composio_mock) instead of
+      # https://backend.composio.dev. Comment this out to use real Composio.
       COMPOSIO_BASE_URL: http://mock-services:8080/composio
       # External-MCP feature (feat/external-mcp-passthrough): tp resolves external
       # secrets from akela's value GET, forwarding the CALLER's token (no static
@@ -1408,6 +1422,9 @@ services:
     environment:
       <<: [*service-urls, *admin-ids, *allowed-origins]
       PORT: 3000
+      # AKELA_BASE_URL isn't in the *service-urls anchor (only mcp-server
+      # fronts akela's vault REST) — point it at the in-cluster akela.
+      AKELA_BASE_URL:    http://akela:8080
       # x-service-urls sets AUTH_ISSUER=http://raksha:8080, which is what
       # mcp-server's auth-verify uses as the trust root. Pin JWKS
       # explicitly so a mis-set AUTH_ISSUER never turns into an unroutable
