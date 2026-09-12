@@ -436,7 +436,10 @@ services:
     restart: unless-stopped
 
   minio:
-    image: minio/minio:latest
+    # quay.io, not docker.io: MinIO removed minio/minio + minio/mc from Docker
+    # Hub (anonymous pull → "repository does not exist"). Digest-pinned so an
+    # upstream tag move can't silently break the local stack again.
+    image: quay.io/minio/minio:latest@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
     environment:
       MINIO_ROOT_USER: minioadmin
       MINIO_ROOT_PASSWORD: minioadmin
@@ -1141,15 +1144,37 @@ services:
       # Logical redis DB 2 (raksha+brahmi=0, mang-proxy=1)
       REDIS_DB: "2"
       REDIS_KEY_PREFIX: "ikki:"
-      # Steel-only — every other provider off. ikki/.env keeps DOCKER+LOUIE on
-      # for its e2e compose; we force them off here.
-      STEEL_ENABLED: "true"
-      DOCKER_PROVIDER_ENABLED: "false"
-      LOUIE_ENABLED: "false"
+      # Docker on-demand provider is the local default: ikki spins a brave-headed
+      # container per session via the host docker socket on the `clode` net and
+      # reaches it at <container>:9222 — no pool-manager, no warm pool. Steel and
+      # the aramb (mock pool-manager) path are off so docker (priority 0) is the
+      # unambiguous selection. These override env_file ../ikki/.env.
+      STEEL_ENABLED: "false"
+      DOCKER_PROVIDER_ENABLED: "true"
+      # DOCKER_NETWORK must be the shared bridge (declared `name: clode`), NOT
+      # ikki/.env's dev-cloud — containers are reached at <name>:9222 on it.
+      DOCKER_NETWORK: clode
+      # Point BOTH images at the locally-built brave-headed image (exported as
+      # BROWSER_IMAGE by `stack up --browser`) so the extension-capable image runs
+      # regardless of the headed/headless flag; private bongcs/* won't auto-pull.
+      DOCKER_HEADED_IMAGE: ${BROWSER_IMAGE:-clode-stack/brave-head:main}
+      DOCKER_HEADLESS_IMAGE: ${BROWSER_IMAGE:-clode-stack/brave-head:main}
+      # Spawned browser containers dial ikki/broker gRPC in plaintext (local ikki
+      # serves h2c). Without this cloudconnect defaults to TLS and its BrowserStream
+      # handshake fails, so IKKI_CONNECT (context Relay + vault-fill/syntho seed) never
+      # completes. ikki maps this to LOUIE_INSECURE=true on each container.
+      DOCKER_BROWSER_INSECURE: "true"
+      LOUIE_ENABLED: "true"
+      # Browser-facing vexor solve URL points at the *.clode.space alias so the
+      # extension's POST matches the browser proxy-bypass list and goes DIRECT to
+      # louie (bare "louie" would route through the syntho residential proxy and
+      # never resolve). Overrides ikki/.env's http://louie:8080/... value.
+      LOUIE_VEXOR_PROXY_URL: http://louie.clode.space:8080/api/v1/captcha/solve
       HARBOR_ENABLED: "false"
       JUMBO_ENABLED: "false"
       BROWSER_BASE_ENABLED: "false"
-      ARAMB_ENABLED: "true"
+      # aramb (mock pool-manager) path off — docker provides on-demand locally.
+      ARAMB_ENABLED: "false"
       # CheckDependencies only probes RAKSHA_URL when Jumbo/Harbor are on, so
       # this is cosmetic for steel-only — set anyway for consistency.
       RAKSHA_URL: http://raksha:8080
@@ -1162,12 +1187,20 @@ services:
       # container has its own loopback; 7602 isn't published to the host either).
       # Override with the traefik alias so the benji agent VM can dial it too.
       CDP_PUBLIC_BASE_URL: ws://ikki.localhost:8080
+      # Extension (vault_fill/vexor) ext-WS base. Set explicitly — it otherwise only
+      # falls back to CDP_PUBLIC_BASE_URL — so the in-container extension's ext_ws_url
+      # is populated; ikki.localhost resolves from the browser container via traefik.
+      EXT_WS_PUBLIC_BASE_URL: ws://ikki.localhost:8080
       # S3 endpoint + creds come from *s3-common (traefik minio origin, so the
       # presigned recording GET URLs ikki mints resolve from the host browser).
       # STORAGE_BUCKET/REGION are ikki's per-service overrides: the bucket holds
       # both context tarballs and session recordings.
       STORAGE_BUCKET:        ikki-session-contexts
       STORAGE_REGION:        us-east-1
+    # ikki's Docker provider creates sibling brave-headed containers via the host
+    # docker socket (docker SDK; no docker CLI needed). Same pattern as pool-manager.
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
     labels:
       # local-only — ikki was never CF-exposed; do not add a srclode rule.
       - traefik.enable=true
