@@ -29,6 +29,7 @@ import (
 	"github.com/sivaram-clode/mock-services/internal/mock/aws"
 	"github.com/sivaram-clode/mock-services/internal/mock/baghira"
 	"github.com/sivaram-clode/mock-services/internal/mock/narnia"
+	"github.com/sivaram-clode/mock-services/internal/mock/poolmanager"
 	"github.com/sivaram-clode/mock-services/internal/server"
 )
 
@@ -52,7 +53,17 @@ func main() {
 	defer func() { _ = awsMock.Close() }()
 
 	dep := deploy.New(awsMock.Docker(), cfg.Network, cfg.PullPolicy)
-	app := server.New(awsMock, narnia.New(dep, jumbo.New(cfg.JumboBaseURL)), baghira.New(dep))
+
+	// pool-manager group — optional: only mounted when the POOL_* ids are set.
+	// A missing/invalid config is non-fatal so the rest of the mock still runs.
+	var poolHandler *poolmanager.Handler
+	if pmCfg, err := poolmanager.LoadConfig(); err != nil {
+		log.Printf("mock-services: pool-manager group disabled: %v", err)
+	} else {
+		poolHandler = poolmanager.New(pmCfg, awsMock.Docker(), dep)
+	}
+
+	app := server.New(awsMock, narnia.New(dep, jumbo.New(cfg.JumboBaseURL)), baghira.New(dep), poolHandler)
 
 	go func() {
 		log.Printf("mock-services: listening on %s (network=%s, jumbo=%s)", cfg.Addr, cfg.Network, cfg.JumboBaseURL)
