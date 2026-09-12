@@ -392,7 +392,8 @@ def main():
             # a one-off `minio/mc` container); mirror that here so cleanup doesn't
             # `docker compose run` a service that doesn't exist.
             s.docker(
-                "run", "--rm", "--network", s.NET, "--entrypoint", "sh", "minio/mc:latest",
+                "run", "--rm", "--network", s.NET, "--entrypoint", "sh",
+                "quay.io/minio/mc:latest@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727",
                 "-c", "mc alias set local http://minio:9000 minioadmin minioadmin >/dev/null && mc rm --recursive --force local/databend/ >/dev/null 2>&1 || true",
                 capture=True, check=False,
             )
@@ -414,7 +415,8 @@ def main():
             print("  \033[2m$\033[0m mc rm --recursive --force local/brahmi-attachments/")
         else:
             s.docker(
-                "run", "--rm", "--network", s.NET, "--entrypoint", "sh", "minio/mc:latest",
+                "run", "--rm", "--network", s.NET, "--entrypoint", "sh",
+                "quay.io/minio/mc:latest@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727",
                 "-c", "mc alias set local http://minio:9000 minioadmin minioadmin >/dev/null && mc rm --recursive --force local/brahmi-attachments/ >/dev/null 2>&1 || true",
                 capture=True, check=False,
             )

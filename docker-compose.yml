@@ -436,7 +436,10 @@ services:
     restart: unless-stopped
 
   minio:
-    image: minio/minio:latest
+    # quay.io, not docker.io: MinIO removed minio/minio + minio/mc from Docker
+    # Hub (anonymous pull → "repository does not exist"). Digest-pinned so an
+    # upstream tag move can't silently break the local stack again.
+    image: quay.io/minio/minio:latest@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
     environment:
       MINIO_ROOT_USER: minioadmin
       MINIO_ROOT_PASSWORD: minioadmin
