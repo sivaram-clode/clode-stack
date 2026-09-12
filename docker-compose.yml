@@ -142,7 +142,10 @@ x-service-urls: &service-urls
   BRAHMI_URL:                 http://brahmi:8080
   BRAHMI_BASE_URL:            http://brahmi:8080
   BRAHMI_WS_URL:              ws://brahmi:8080
-  POOL_MANAGER_URL:           http://pool-manager:8080
+  # On-demand, origin-aware claim shim in mock-services (no warm pool). Points
+  # brahmi (and any inheritor) at the /pool-manager group instead of the real
+  # pool-manager service, which stays behind the `pool` profile / unused.
+  POOL_MANAGER_URL:           http://mock-services:8080/pool-manager
   CHACHING_URL:               http://cha-ching:8086
   # mang-proxy's name for the same target (usage-ledger POST /api/v1/usage-events
   # /batch). Empty = the whole usageq pipeline is disabled (no queue, no workers,
@@ -1132,7 +1135,7 @@ services:
       # Local aramb provider targets — ikki's repo .env ships dev-aramb-stub:0
       # placeholders; point them at the real in-stack services (clode bridge).
       ARAMB_JUMBO_BASE_URL: http://jumbo:8080
-      ARAMB_POOL_MANAGER_URL: http://pool-manager:8080
+      ARAMB_POOL_MANAGER_URL: http://mock-services:8080/pool-manager
       PORT: 7602
       GRPC_PORT: 7603
       # Logical redis DB 2 (raksha+brahmi=0, mang-proxy=1)
@@ -1705,11 +1708,18 @@ services:
       # + tool data there, keyed by connect-ref. A connection completes only when
       # its returned OAuth URL is opened + authorized (no auto-activation).
       # COMPOSIO_MOCK_PUBLIC_URL defaults to the traefik mock-services.localhost route.
-      <<: *db-common
+      # *admin-ids supplies the pool identity (POOL_OWNER_ID / POOL_PROJECT_ID /
+      # POOL_APPLICATION_ID) the /pool-manager group creates on-demand services
+      # under before transferring them to the claimant — same ids the real
+      # pool-manager uses.
+      <<: [*db-common, *admin-ids]
       # The /narnia group pulls each deployment's config from jumbo and posts
-      # status callbacks back to it. Lazy — only dialed when a deploy arrives,
-      # so no depends_on on jumbo (avoids a jumbo↔mock-services cycle).
+      # status callbacks back to it; the /pool-manager group creates + triggers
+      # deployments on jumbo (and mints a pool-owner token from raksha) at claim
+      # time. All lazy — only dialed when a deploy/claim arrives, so no
+      # depends_on on jumbo/raksha (avoids a jumbo↔mock-services cycle).
       JUMBO_BASE_URL: http://jumbo:8080
+      RAKSHA_URL: http://raksha:8080
       # The /oauth-mock group prefills the consent form's email field with this;
       # name/id/avatar are derived from whatever email is submitted.
       DEFAULT_EMAIL: testuser@clode.dev
@@ -1722,6 +1732,11 @@ services:
       db: { condition: service_healthy }
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
+      # The /pool-manager group reads its origin→image list here (hot-reloaded
+      # per claim). Edit docker/mock-services/provision.yaml (or add an
+      # `origins.<fork>` block) to point a fork's claims at a worktree image.
+      # Absent ⇒ the group's built-in baseline default map is used.
+      - ./docker/mock-services/provision.yaml:/etc/mock-services/provision.yaml:ro
       # The `imds` group READS its signing cert.pem + key.pem from here (never
       # generates). Same operator-provided dir brahmi mounts to verify; *.pem is
       # git-ignored. Absent/empty ⇒ fatal at boot (local-testing signer only).

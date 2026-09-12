@@ -19,6 +19,20 @@ Config schema:
       brahmi:        { branch: feat/x, db: reuse }   # branch -> build clode-stack/brahmi:b1
       aramb-gateway: { mirror: true }                # baseline image, run as aramb-gateway-b1
     console: true                                    # build console-b1 -> forked backends
+    browser: { branch: feat/x }                      # OPTIONAL: build clode-stack/brave-head:b1 from
+                                                     #   ../agent-base-docker worktree (context brave-headed/);
+                                                     #   auto-wires the aramb-browser claim to it (see provision)
+    provision:                                       # OPTIONAL: on-demand pod/browser images
+      aramb-browser: { image: clode-stack/brave-head:{name}, env: { IKKI_GRPC_ADDR: ikki:9000 } }
+      # kairo: { image: clode-stack/benji:{name} }
+      #
+      # A claim from THIS fork's containers is provisioned with these images by
+      # the mock /pool-manager group. wfork writes them under origins.<name> in
+      # docker/mock-services/provision.yaml on `up` and deletes them on `down`;
+      # the mock re-reads that file per claim (it NEVER reads fork.*.yaml). `{name}`
+      # expands to the fork name; forked-peer hosts in `env` are rewritten to
+      # <peer>-<name> (so `ikki` → `ikki-b1` when ikki is forked). A `browser:`
+      # block alone injects the aramb-browser entry above, so you rarely write it.
 """
 import argparse
 import json
@@ -36,6 +50,12 @@ import stacklib as s  # noqa: E402
 
 GRAPH = Path(__file__).resolve().parent / "lib" / "service-graph.json"
 STATE = s.STACK_DIR / ".forks"
+
+# The mock /pool-manager group's origin→image list. Relative bind paths in
+# docker-compose.yml resolve against --project-directory (STACK_DIR), so this is
+# the exact file mock-services has mounted. wfork owns the `origins.<fork>` blocks
+# (add on up, remove on down); the mock re-reads it per claim.
+PROVISION_FILE = s.STACK_DIR / "docker" / "mock-services" / "provision.yaml"
 
 # service -> the VITE_* var the console SPA reads (+ any path suffix) for its build
 VITE_VAR = {
@@ -91,7 +111,30 @@ def load_config(path: str) -> dict:
         s.log("note: 'agents: true' is obsolete — a forked brahmi provisions on-demand VMs "
               "on its own (no pool-manager fork). Add a `benji:` block for a fork-specific "
               "agent image, or fork `pool-manager` explicitly for the legacy pod path.")
-    return {"name": name, "services": services, "console": console, "benji": benji}
+    # Optional fork-specific browser image: build clode-stack/brave-head:<name>
+    # from the ../agent-base-docker worktree at this branch (context brave-headed/).
+    # Claimed by ikki's aramb-browser pool client; wired via the provision block below.
+    browser = raw.get("browser")
+    if browser is not None:
+        if not isinstance(browser, dict) or not browser.get("branch"):
+            s.die("config: browser block needs a 'branch' (the ../agent-base-docker branch to build)")
+        browser = {"branch": browser["branch"]}
+
+    # Optional on-demand provisioning map (serviceType -> {image[, env]}). wfork
+    # materializes it into the mock /pool-manager group's provision.yaml under
+    # origins.<name>; the mock resolves the caller's image from there per claim.
+    provision = raw.get("provision") or {}
+    if provision and not isinstance(provision, dict):
+        s.die("config: 'provision' must be a map of serviceType -> {image[, env]}")
+    # A `browser:` block auto-wires its built image into the aramb-browser claim
+    # (unless the provision block already defines one) — so `browser: {branch}` plus
+    # a forked ikki is enough to make the browser leg use the fork image.
+    if browser and "aramb-browser" not in provision:
+        provision = {**provision,
+                     "aramb-browser": {"image": "clode-stack/brave-head:{name}",
+                                       "env": {"IKKI_GRPC_ADDR": "ikki:9000"}}}
+    return {"name": name, "services": services, "console": console,
+            "benji": benji, "browser": browser, "provision": provision}
 
 
 def load_graph():
@@ -245,6 +288,24 @@ def benji_build(name, branch, brahmi_image, vova_image=None):
     return image
 
 
+def browser_build(name, branch):
+    """Build clode-stack/brave-head:<name> from the ../agent-base-docker worktree
+    at <branch> (build context brave-headed/). This is the fork-scoped counterpart
+    of `stack up --browser` (which builds clode-stack/brave-head:main). SSH is
+    forwarded so the build can read private sources if the Dockerfile needs them.
+    The image is referenced by the fork's aramb-browser provision entry
+    (clode-stack/brave-head:{name}), which the mock /pool-manager deploys on claim."""
+    base = s.STACK_DIR / ".." / "agent-base-docker"
+    dir_ = worktree_dir(base, branch)
+    if not dir_ or not Path(dir_, "brave-headed", "Dockerfile").exists():
+        s.die(f"browser: no worktree/brave-headed Dockerfile for branch '{branch}' under {base}")
+    ctx = Path(dir_) / "brave-headed"
+    image = f"clode-stack/brave-head:{name}"
+    s.log(f"browser: building {image} from '{branch}' ({ctx})")
+    s.docker("build", "-f", str(ctx / "Dockerfile"), "--ssh", "default", "-t", image, str(ctx))
+    return image
+
+
 def branch_build(svc, branch, image):
     """Build clode-stack/<svc>:<name> from the branch worktree, reusing the up build path."""
     base = s.STACK_DIR / ".." / svc
@@ -315,6 +376,83 @@ def console_up(name, forked, project):
     s.log(f"  -> http://{cname}.localhost:8080")
 
 
+# ── on-demand provisioning list (mock /pool-manager) ───────────────────────────
+_PROVISION_HEADER = (
+    "# provision.yaml — the mock /pool-manager group's origin→image list.\n"
+    "# `default.<serviceType>` is the baseline; `origins.<fork>.<serviceType>` blocks\n"
+    "# are managed by wfork (added on `wfork up`, removed on `wfork down`). The mock\n"
+    "# re-reads this file per claim, so changes take effect without a restart.\n"
+)
+
+
+def _sub_name(val: str, name: str) -> str:
+    """Expand the {name} token to the fork name in an image/env value."""
+    return str(val).replace("{name}", name)
+
+
+def _rewrite_peer(val: str, name: str, forked) -> str:
+    """Rewrite forked-peer hostnames to <peer>-<name> — same host-token rule as
+    build_env, so an env value like `ikki:9000` targets the fork's ikki."""
+    for peer in forked:
+        pat = re.compile(rf"(^|[/@]){re.escape(peer)}(?=[:/])")
+        val = pat.sub(rf"\g<1>{peer}-{name}", val)
+    return val
+
+
+def _read_provision() -> dict:
+    if PROVISION_FILE.exists():
+        return yaml.safe_load(PROVISION_FILE.read_text()) or {}
+    return {}
+
+
+def _write_provision(doc: dict) -> None:
+    # In-place truncate write (never rename): a single-file docker bind mount is
+    # bound by inode, so mock-services only sees edits made to the SAME inode.
+    body = yaml.safe_dump(doc, sort_keys=False, default_flow_style=False)
+    PROVISION_FILE.write_text(_PROVISION_HEADER + "\n" + body)
+
+
+def provision_register(name, cfg, forked):
+    """Write this fork's provision block under origins.<name> in provision.yaml.
+    Everything the mock needs comes from fork.yml — the mock never reads it."""
+    prov = cfg.get("provision") or {}
+    if not prov:
+        return
+    if not PROVISION_FILE.parent.is_dir():
+        s.log(f"provision: {PROVISION_FILE.parent} missing — skipping (mock-services not present)")
+        return
+    entry = {}
+    for stype, m in prov.items():
+        m = m or {}
+        image = _sub_name(m.get("image", ""), name)
+        if not image:
+            s.die(f"provision: serviceType '{stype}' needs an 'image'")
+        block = {"image": image}
+        env = {k: _rewrite_peer(_sub_name(v, name), name, forked)
+               for k, v in (m.get("env") or {}).items()}
+        if env:
+            block["env"] = env
+        entry[stype] = block
+    doc = _read_provision()
+    doc.setdefault("origins", {})[name] = entry
+    _write_provision(doc)
+    s.log(f"provision: registered origin '{name}' -> {', '.join(sorted(entry))}")
+
+
+def provision_unregister(name):
+    """Remove origins.<name> from provision.yaml (fork teardown)."""
+    if not PROVISION_FILE.exists():
+        return
+    doc = _read_provision()
+    origins = doc.get("origins") or {}
+    if name in origins:
+        del origins[name]
+        if not origins:
+            doc.pop("origins", None)
+        _write_provision(doc)
+        s.log(f"provision: unregistered origin '{name}'")
+
+
 # ── commands ──────────────────────────────────────────────────────────────────
 def cmd_preview(cfg):
     name, forked = cfg["name"], list(cfg["services"])
@@ -346,6 +484,14 @@ def cmd_preview(cfg):
 
     if cfg["console"]:
         print(f"\nconsole: console-web-{name} built pointing forked backends -> -{name} (rest baseline)")
+    if cfg.get("browser"):
+        print(f"\nbrowser image: clode-stack/brave-head:{name} built from "
+              f"../agent-base-docker@{cfg['browser']['branch']} (context brave-headed/)")
+    if cfg.get("provision"):
+        print("\non-demand images (mock /pool-manager, written to provision.yaml origins."
+              f"{name} on up):")
+        for stype, m in cfg["provision"].items():
+            print(f"  - {stype}: {_sub_name((m or {}).get('image', '?'), name)}")
     print("\nreviewed? then: wfork up")
 
 
@@ -413,6 +559,11 @@ def cmd_up(cfg, fresh_db_wipe=False):
         vova_img = images.get("vova") if vs.get("branch") else None
         benji_image = benji_build(name, cfg["benji"]["branch"], brahmi_img, vova_img)
 
+    # Optional per-fork browser image (clode-stack/brave-head:<name>), deployed on
+    # demand by the mock /pool-manager for this fork's aramb-browser claims.
+    if cfg.get("browser"):
+        browser_build(name, cfg["browser"]["branch"])
+
     # Pass 2 — fresh DBs, env rewrite, run.
     for svc, m in cfg["services"].items():
         cname = f"{svc}-{name}"
@@ -453,6 +604,10 @@ def cmd_up(cfg, fresh_db_wipe=False):
         s.run([sys.executable, str(s.REPO_DIR / "scripts" / "seed.py"), "svc-configs", pm_db],
               env={"BENJI_IMAGE": benji_img}, check=False)
 
+    # Register this fork's on-demand images with the mock /pool-manager group so
+    # a claim from these containers is provisioned with the fork's images.
+    provision_register(name, cfg, forked)
+
     (STATE / f"{name}.applied.json").write_text(json.dumps(cfg, indent=2))
     print()
     s.log(f"fork '{name}' up. rebuild: re-run `wfork up` (data preserved). down: wfork down {name}")
@@ -485,6 +640,7 @@ def cmd_down(name):
         os.environ["COMPOSE_PROFILES"] = s.compose_profiles()
         drop_fresh_dbs(name, cfg, s.compose_config()["services"])
         applied.unlink()
+    provision_unregister(name)
     s.log(f"fork '{name}' down")
 
 
