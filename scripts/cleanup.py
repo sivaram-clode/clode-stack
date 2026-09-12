@@ -388,10 +388,13 @@ def main():
             # Stop + rm the containers first so the meta volume detaches cleanly;
             # `docker volume rm` refuses while a container still references it.
             s.compose("rm", "-sf", "databend", "mang-proxy", capture=True)
-            s.compose(
-                "run", "--rm", "--entrypoint", "sh", "minio-setup",
+            # minio-setup is no longer a compose service (up.py runs the setup as
+            # a one-off `minio/mc` container); mirror that here so cleanup doesn't
+            # `docker compose run` a service that doesn't exist.
+            s.docker(
+                "run", "--rm", "--network", s.NET, "--entrypoint", "sh", "minio/mc:latest",
                 "-c", "mc alias set local http://minio:9000 minioadmin minioadmin >/dev/null && mc rm --recursive --force local/databend/ >/dev/null 2>&1 || true",
-                capture=True,
+                capture=True, check=False,
             )
             s.docker("volume", "rm", "-f", meta_vol, capture=True, check=False)
             s.compose("up", "-d", "databend", "mang-proxy", capture=True)
@@ -410,10 +413,10 @@ def main():
         if DRY_RUN:
             print("  \033[2m$\033[0m mc rm --recursive --force local/brahmi-attachments/")
         else:
-            s.compose(
-                "run", "--rm", "--entrypoint", "sh", "minio-setup",
+            s.docker(
+                "run", "--rm", "--network", s.NET, "--entrypoint", "sh", "minio/mc:latest",
                 "-c", "mc alias set local http://minio:9000 minioadmin minioadmin >/dev/null && mc rm --recursive --force local/brahmi-attachments/ >/dev/null 2>&1 || true",
-                capture=True,
+                capture=True, check=False,
             )
             ok("brahmi-attachments emptied")
 
