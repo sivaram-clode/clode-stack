@@ -27,13 +27,10 @@ import (
 	"github.com/sivaram-clode/mock-services/internal/mock/imds"
 	"github.com/sivaram-clode/mock-services/internal/mock/narnia"
 	"github.com/sivaram-clode/mock-services/internal/mock/oauthmock"
-	"github.com/sivaram-clode/mock-services/internal/mock/poolmanager"
 )
 
 // New builds the Fiber app wiring every mock's route group + a liveness probe.
-// ph may be nil when the pool-manager env (POOL_* ids) is not configured — the
-// /pool-manager group is then simply not mounted.
-func New(awsMock *aws.Mock, nh *narnia.Handler, bh *baghira.Handler, ph *poolmanager.Handler) *fiber.App {
+func New(awsMock *aws.Mock, nh *narnia.Handler, bh *baghira.Handler) *fiber.App {
 	app := fiber.New(fiber.Config{
 		DisableStartupMessage: true,
 		AppName:               "mock-services",
@@ -55,14 +52,6 @@ func New(awsMock *aws.Mock, nh *narnia.Handler, bh *baghira.Handler, ph *poolman
 	// narnia + baghira groups — native Fiber, one prefix each.
 	nh.Register(app.Group("/narnia", scoped("narnia")))
 	bh.Register(app.Group("/baghira", scoped("baghira")))
-
-	// pool-manager group — on-demand, origin-aware claim shim standing in for
-	// the real pool-manager (brahmi/ikki point their POOL_MANAGER_URL /
-	// ARAMB_POOL_MANAGER_URL at http://mock-services:8080/pool-manager). Mounted
-	// only when configured (POOL_* ids present).
-	if ph != nil {
-		ph.Register(app.Group("/pool-manager", scoped("pool-manager")))
-	}
 
 	// imds group — a stand-in for AWS EC2 IMDS. aramb-vm agent containers get
 	// IMDS_BASE_URL=http://mock-services:8080/imds/<instance-id> injected by the
