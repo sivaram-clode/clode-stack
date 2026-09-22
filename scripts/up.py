@@ -106,8 +106,10 @@ def ensure_minio_buckets():
               f"{mk}\n{pub}\n")
     # minio/mc's ENTRYPOINT is `mc`, so override it to sh to run the script
     # (else `sh` is parsed as an mc subcommand).
+    # Self-hosted mirror of minio/mc 9.6 (old quay ref:
+    # quay.io/minio/mc@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727).
     s.docker("run", "--rm", "--network", s.NET, "--entrypoint", "sh",
-             "quay.io/minio/mc:latest@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727",
+             "docker.io/sivaramclode/mc:quay",
              "-c", script)
 
 

@@ -393,7 +393,7 @@ def main():
             # `docker compose run` a service that doesn't exist.
             s.docker(
                 "run", "--rm", "--network", s.NET, "--entrypoint", "sh",
-                "quay.io/minio/mc:latest@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727",
+                "docker.io/sivaramclode/mc:quay",
                 "-c", "mc alias set local http://minio:9000 minioadmin minioadmin >/dev/null && mc rm --recursive --force local/databend/ >/dev/null 2>&1 || true",
                 capture=True, check=False,
             )
@@ -416,7 +416,7 @@ def main():
         else:
             s.docker(
                 "run", "--rm", "--network", s.NET, "--entrypoint", "sh",
-                "quay.io/minio/mc:latest@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727",
+                "docker.io/sivaramclode/mc:quay",
                 "-c", "mc alias set local http://minio:9000 minioadmin minioadmin >/dev/null && mc rm --recursive --force local/brahmi-attachments/ >/dev/null 2>&1 || true",
                 capture=True, check=False,
             )

@@ -435,10 +435,12 @@ services:
     restart: unless-stopped
 
   minio:
-    # quay.io, not docker.io: MinIO removed minio/minio + minio/mc from Docker
-    # Hub (anonymous pull → "repository does not exist"). Digest-pinned so an
-    # upstream tag move can't silently break the local stack again.
-    image: quay.io/minio/minio:latest@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
+    # Self-hosted mirror of MinIO RELEASE.2025-09-07T16-13-09Z (upstream
+    # minio/minio + minio/mc were pulled from Docker Hub). Re-tagged from the
+    # old quay.io digest into our own public repo so pulls don't depend on
+    # quay; the `quay` tag is immutable in our repo. Old quay ref for
+    # reference: quay.io/minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
+    image: docker.io/sivaramclode/minio:quay
     environment:
       MINIO_ROOT_USER: minioadmin
       MINIO_ROOT_PASSWORD: minioadmin
