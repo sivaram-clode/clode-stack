@@ -363,6 +363,14 @@ services:
       # would be picked up here too and log route conflicts. Baseline is project `clode`.
       - --providers.docker.constraints=Label(`com.docker.compose.project`,`clode`)
       - --entrypoints.web.address=:8080
+      # websecure — internal :443 TLS so on-bridge callers (brahmi -> minio.srclode.online)
+      # can reach the same public host the off-cluster E2B sandbox uses (SigV4 host must
+      # match). http.tls=true makes every Host(...) router serve TLS here with the default
+      # self-signed cert (from the file provider) — no per-router labels needed. The CF
+      # tunnel still hits :8080; :443 is bridge-internal only.
+      - --entrypoints.websecure.address=:443
+      - --entrypoints.websecure.http.tls=true
+      - --providers.file.directory=/tls
       - --api.dashboard=true
       # ping serves the healthcheck; pin it to the web entrypoint —
       # bare --ping=true auto-creates the default `traefik` entrypoint
@@ -374,6 +382,7 @@ services:
       - "8080:8080"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./.local/traefik-tls:/tls:ro
     labels:
       - traefik.enable=true
       # dashboard — http://traefik.localhost:8080 (local-only, no srclode rule)
@@ -1176,6 +1185,19 @@ services:
       BROWSER_BASE_ENABLED: "false"
       # aramb (mock pool-manager) path off — docker provides on-demand locally.
       ARAMB_ENABLED: "false"
+      # E2B provider — off-cluster browser sandboxes. Pre-wired but kept OFF
+      # (set E2B_ENABLED=true in ../ikki/.env to turn on; the API key + template
+      # IDs already ship there). The public gRPC addrs point at the `bore-tunnel`
+      # service's endpoints so the sandbox's callhome reaches ikki+louie from
+      # outside the `clode` bridge: E2B_IKKI_GRPC_ADDR = ikki:7603's public bore
+      # port, LOUIE_BROKER_PUBLIC_GRPC_ADDR = louie:8600's. Both are raw-TCP bore
+      # tunnels (no TLS), so E2B_LOUIE_INSECURE flips the container's callhome to
+      # plaintext h2c, and E2B_SYNTHO_FORCE_PUBLIC egresses via the public syntho
+      # SOCKS URL — the sandbox is always cross-cluster from louie.
+      E2B_IKKI_GRPC_ADDR:            bore.pub:7603
+      LOUIE_BROKER_PUBLIC_GRPC_ADDR: bore.pub:8600
+      E2B_LOUIE_INSECURE:            "true"
+      E2B_SYNTHO_FORCE_PUBLIC:       "true"
       # CheckDependencies only probes RAKSHA_URL when Jumbo/Harbor are on, so
       # this is cosmetic for steel-only — set anyway for consistency.
       RAKSHA_URL: http://raksha:8080
@@ -1268,10 +1290,17 @@ services:
       HTTP_PROXY_ENABLED: "true"
       HTTP_PROXY_DOMAIN:  ${STACK_TUNNEL_DOMAIN:-tunnel.localhost}
       HTTP_PROXY_PORT:    "8280"
-      # Local run — keep syntho + vexor off. ../louie/.env ships them
-      # enabled with prod Evomi / 2captcha / capsolver keys; we don't
-      # want the local stack burning quota on those providers.
-      SYNTHO_ENABLED: "false"
+      # Syntho — the residential-proxy SOCKS5 data plane. Pre-wired but kept
+      # OFF locally (../louie/.env ships it on with prod Evomi keys we don't
+      # want the local stack burning); flip SYNTHO_ENABLED to "true" to turn
+      # it on. The advertised hosts are set either way so enabling is a
+      # one-line change: public host = the `syntho-tunnel` bore endpoint below
+      # (baked into the proxy_url handed to clients so egress reaches louie
+      # from the internet), private host = louie:11080 direct on the `clode`
+      # bridge. Vexor stays off for the same quota reason.
+      SYNTHO_ENABLED:            "false"
+      SYNTHO_PUBLIC_SOCKS_HOST:  bore.pub:11081
+      SYNTHO_PRIVATE_SOCKS_HOST: louie:11080
       VEXOR_ENABLED:  "false"
     ports:
       - "8600:8600"   # gRPC (kairo agents dial louie:8600 in-network; host clients dial localhost:8600)
@@ -1299,6 +1328,45 @@ services:
       timeout: 5s
       retries: 5
       start_period: 30s
+    restart: unless-stopped
+
+  # ------------------------------------------------------------------
+  # bore-tunnel — ONE container publishing several in-stack TCP ports to
+  # the public internet through bore.pub. Off-cluster browsers (ikki's
+  # E2B provider) run outside the `clode` bridge and must reach three
+  # endpoints over the internet, so each gets a raw-TCP bore tunnel:
+  #
+  #   louie:11080 -> bore.pub:11081   syntho SOCKS5 residential-proxy egress
+  #                                   (SYNTHO_PUBLIC_SOCKS_HOST on louie)
+  #   louie:8600  -> bore.pub:8600    broker gRPC — the container's
+  #                                   louie-cloud-connect callhome
+  #                                   (LOUIE_BROKER_PUBLIC_GRPC_ADDR on ikki)
+  #   ikki:7603   -> bore.pub:7603    ikki gRPC — the browser callhome
+  #                                   (E2B_IKKI_GRPC_ADDR on ikki)
+  #
+  # bore's `local` forwards ONE port per process and the stock ekzhang/bore
+  # image is FROM scratch (no shell), so we run all three from a single
+  # service via a tiny wrapper image (docker/bore-tunnel/) that fans out one
+  # `bore local` per TUNNELS entry. `browser` profile so it rides with
+  # louie+ikki. bore.pub is a shared public relay — the requested remote
+  # ports are best-effort; run a self-hosted `bore server` (set BORE_RELAY)
+  # if you need the exact ports the gRPC addrs above are baked to.
+  #
+  # Inert until the consumers are enabled: nothing listens on louie:11080
+  # while SYNTHO_ENABLED=false, and the gRPC tunnels only carry traffic once
+  # ikki's E2B provider (E2B_ENABLED) dials in — bore just retries a dead
+  # local port until then.
+  # ------------------------------------------------------------------
+  bore-tunnel:
+    profiles: [browser]
+    build:
+      context: ./docker/bore-tunnel
+    environment:
+      TUNNELS: "louie:11080:11081 louie:8600:8600 ikki:7603:7603"
+    depends_on:
+      louie: { condition: service_healthy }
+      ikki:  { condition: service_healthy }
+    networks: [clode]
     restart: unless-stopped
 
   # ------------------------------------------------------------------

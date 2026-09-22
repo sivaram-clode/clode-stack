@@ -191,7 +191,7 @@
       "service_type": "aramb-browser",
       "settings": {
         "cpu": 0.5,
-        "image": "clode-stack/brave-head",
+        "image": "clode-stack/brave-head:main",
         "memory": 1,
         "runAsRoot": true,
         "healthChecks": [
@@ -211,6 +211,10 @@
       "vars": [
         {
           "key": "IKKI_CONNECT",
+          "value": "true"
+        },
+         {
+          "key": "LOUIE_INSECURE",
           "value": "true"
         }
       ],
