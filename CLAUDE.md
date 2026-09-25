@@ -19,20 +19,29 @@ Names that *containers* dial (S3 signing host, OAuth token endpoint,
 agent callbacks, CDP) are network-aliased to traefik on the `clode`
 bridge, so one URL string is valid from host and containers alike.
 
-The stack is **fully local by default** — Cloudflare is opt-in:
-`./stack.sh up --public` starts cloudflared (compose profile `public`,
-single catch-all ingress rule `*.srclode.online → traefik:8080`) and
-exports `STACK_SCHEME/STACK_DOMAIN/STACK_PORT/STACK_TUNNEL_DOMAIN` so
-outward-facing URL values interpolate to `https://<svc>.srclode.online`.
-Only inbound-from-internet paths need it: Resend delivery webhooks
-(notify), Slack OAuth install + Telegram webhook (chil), GitHub App
-callbacks (gitana), Composio callbacks (toolkit-proxy), external MCP
-clients, shareable louie tunnel URLs. up.py prints the applicable
-warnings per running service in local mode.
+**cloudflared is always on** — no mode toggle. The `public` compose profile
+is gone; every `up` starts cloudflared (single catch-all `*.srclode.online →
+traefik:8080`). `--public` is a deprecated no-op and the
+`STACK_SCHEME/DOMAIN/PORT` interpolation is removed.
 
-Services never CF-exposed (mock-services, ikki, minio-console, narnia, the
-traefik dashboard) carry a `.localhost`-only router rule — do NOT add
-srclode rules to them; mock-services's admin API is unauthenticated.
+URLs split **by caller, not by flag**: service↔service traffic stays
+in-cluster (`http://<svc>:<port>`, the x-service-urls anchor), and everything a
+**browser or agent** touches is the public `https://<svc>.srclode.online` host
+— uniform whether the caller is on-bridge or off-cluster. srclode network
+aliases on traefik resolve the public host in-cluster too, so on-bridge callers
+skip the CF edge round-trip. Public-by-caller covers: the `*_EXTERNAL_URL`
+family agents see (jumbo/mang-proxy/toolkit-proxy/chil), `AGENT_BRAHMI_URL`,
+ikki's CDP/ext-WS/recording-mint URLs, S3 presigned URLs, plus the
+inbound-from-internet webhook/OAuth/MCP surfaces (notify, chil, gitana,
+toolkit-proxy, mcp-server) and shareable louie tunnel URLs.
+
+**gRPC + SOCKS never ride CF** — CF Tunnel public hostnames don't support gRPC
+(private-subnet only). The ikki (`:7603`) and louie broker (`:8600`) gRPC
+callhome and syntho SOCKS stay on the `bore-tunnel` service.
+
+Unauthenticated admin surfaces (mock-services, minio-console, narnia, the
+traefik dashboard) carry a `.localhost`-only router rule — do NOT add srclode
+rules to them. **ikki IS public** now (browsers/agents dial it off-cluster).
 
 ## Layout
 
@@ -60,8 +69,7 @@ clode-stack/
 # Provider tokens (CLAUDE_CODE_OAUTH_TOKEN, ANTHROPIC_API_KEY, OPENAI_API_KEY,
 # CODEX_OAUTH_TOKEN+REFRESH) live in ../mang-proxy/.env — stack doesn't load them.
 
-./stack.sh up                  # build + up + seed (idempotent) — fully local, no Cloudflare
-./stack.sh up --public         # + cloudflared edge (webhooks, OAuth installs, external MCP clients)
+./stack.sh up                  # build + up + seed (idempotent) — cloudflared edge always on
 ./stack.sh up jumbo brahmi     # subset; seeder skipped on partial bring-ups
 ./stack.sh up --agent          # force-rebuild the benji agent image (../benji/Dockerfile). aramb-vm is already the default; `up` builds benji if absent, --agent rebuilds it
 ./stack.sh up --browser        # + build the brave-head browser image (../agent-base-docker/brave-headed) for the aramb-browser pool; pair with --profile browser for ikki
@@ -221,49 +229,39 @@ static-seed loop, and the restart-looper kick all key off it (set via
 - **`./stack.sh wipe` prunes BuildKit cache globally.** Cache mounts are
   anonymous and unlabeled, so the prune hits every other docker project on
   the host. `--wipe` is the explicit opt-in.
-- **Cloudflare edge rewrites `Accept-Encoding` → SigV4 breakage for
-  `aws-sdk-go-v2` through `minio.srclode.online` (--public only).** CF's edge
-  unconditionally sets `Accept-Encoding: gzip, br` on every request before it
-  reaches the tunnel. `aws-sdk-go-v2` includes Accept-Encoding in its SigV4
-  signed-headers list (`boto3`/aws-cli/`mc` don't), so the value the client
-  signs (`identity`) and what MinIO validates against (`gzip, br`) diverge →
-  `403 SignatureDoesNotMatch` on every PUT/GET. Verified with a hand-rolled
-  SigV4 truth table: signing `identity` + wire=identity fails via CF but
-  passes direct; signing `gzip, br` + wire=identity passes via CF but fails
-  direct; dropping AE from the signed-headers set passes both ways. Blast
-  radius is exactly that one header — Host / X-Amz-Date / X-Amz-Content-Sha256
-  / body all survive CF intact. CF blocks Accept-Encoding manipulation from
-  Transform Rules / Workers / Snippets, so the fix has to live origin-side.
-  **Fix in place:** the `ae-identity` traefik middleware (declared on the
-  traefik service labels, attached to the minio router) pins
-  `Accept-Encoding: identity` before proxying to `minio:9000`. traefik
-  passes Host through untouched (SigV4 signs Host too) and streams bodies
-  unbuffered (STREAMING-AWS4-HMAC-SHA256-PAYLOAD compatible). This replaced
-  the dedicated `minio-proxy` nginx shim — its config and the SigV4
-  truth-table repro tests are retained at `docker/minio-proxy/` for
-  reference; the tests still prove the CF behavior if repointed at the
-  traefik-fronted hostname. Local traffic never touches CF, so the
-  middleware is a no-op there.
-
-  Consumers whose presigned URLs leave the container (brahmi attachments,
-  intervix + ikki recordings, vova audio) sign against the traefik minio
-  origin (`http://minio.localhost:8080` local / `https://minio.srclode.online`
-  public — network aliases make both resolvable in-network), shared via the
-  `x-s3-common` / `x-minio-endpoint` compose anchors. databend is the sole
-  backend that stays on `http://minio:9000` direct (internal storage engine,
-  never presigned) with its own `AWS_S3_*` env. Desktop tools: `mc alias set local
+- **S3 is split by caller: operations in-cluster, presigns public.** Each
+  aws-sdk consumer (brahmi attachments, intervix + ikki recordings, vova audio)
+  builds TWO clients. Operations (Put/Get/Head) always go in-cluster over
+  plaintext `http://minio:9000` (`x-minio-op-endpoint`) — never through
+  traefik/CF. A second, presign-only client is bound to the public host
+  (`x-minio-presign-endpoint`, wired as `S3_PRESIGN_ENDPOINT_URL` — vova uses
+  `S3_PRESIGN_ENDPOINT`): presigning is a pure local SigV4 computation, so it
+  stamps the public Host into the signed URL without ever dialing. This is what
+  fixed the old breakage — an SDK client pointed at the public host dialed
+  traefik's `:443` websecure (self-signed cert) or the CF edge and the
+  operation failed; only presigned URLs need the public host, and those now go
+  through a separate client. databend stays on `http://minio:9000` direct
+  (internal storage engine, never presigned). Desktop tools: `mc alias set local
   http://minio.localhost:8080 minioadmin minioadmin`; console at
   `http://minio-console.localhost:8080`.
+
+  The `ae-identity` traefik middleware (it pinned `Accept-Encoding: identity`
+  so `aws-sdk-go-v2`'s SigV4 — which signs that header, unlike boto3/mc —
+  stayed valid across the CF edge, which unconditionally rewrites it to
+  `gzip, br`) is now a **no-op safety net**: SDK operations no longer cross CF,
+  and presigned fetches don't sign Accept-Encoding. The old `minio-proxy` nginx
+  shim + SigV4 truth-table repro tests remain at `docker/minio-proxy/` for
+  reference.
 
   **When you suspect the ingress is your bug:**
   1. `curl -s http://minio.localhost:8080/minio/health/live` → 200 means
      traefik routing + minio alive. Fails → check `docker logs
      clode-traefik-1` and that the minio router labels are present
      (`http://traefik.localhost:8080` dashboard lists every router).
-  2. SigV4 403s via `--public` only → verify ae-identity is attached:
-     the request's Accept-Encoding must arrive at minio as `identity`.
-     The `docker/minio-proxy/tests/*.sh` openssl signers reproduce the
-     truth table when pointed at the public hostname.
+  2. SigV4 403 on a PUT/GET → the SDK client is signing/dialing the wrong
+     endpoint. Operations must use `S3_ENDPOINT_URL`=`http://minio:9000`
+     (in-cluster); only presigned URLs use the public presign endpoint. A 403
+     usually means an operational client was pointed at the public host.
 
 - **Cloudflared: ingress rule ≠ DNS routing.** An entry in
   `cloudflared-config.yml` only tells the tunnel HOW to forward; the
