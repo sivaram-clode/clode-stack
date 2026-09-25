@@ -27,17 +27,15 @@ Usage:
                                          #   from AGENT_BASE_DOCKER_DIR if set, else
                                          #   ../agent-base-docker. Pair with
                                          #   `--profile browser` to bring up ikki (IKKI_CONNECT).
-    ./up.py --public                     # + cloudflared edge: flips outward URLs to https://*.srclode.online
     BUILD_BATCH_SIZE=4 ./up.py           # env var still honored (--batch wins if both set)
 
-Local vs public:
-    Default is fully local — traefik on host 8080 is the only HTTP entry
-    point (`<svc>.localhost:8080`), nothing depends on Cloudflare. --public
-    additionally starts cloudflared (compose profile `public`) and exports
-    STACK_SCHEME/STACK_DOMAIN/STACK_PORT/STACK_TUNNEL_DOMAIN so the
-    outward-facing URL values interpolate to https://*.srclode.online.
-    A capability report at the end says which inbound-from-internet paths
-    are off in local mode (provider webhooks, OAuth installs, …).
+Ingress:
+    traefik on host 8080 serves `<svc>.localhost:8080` for local browsing, and
+    the always-on cloudflared edge fronts the public `<svc>.srclode.online`
+    hosts. Service↔service traffic stays in-cluster (http://<svc>:<port>);
+    everything a browser or agent touches is the public host. There is no mode
+    switch — `--public` is a deprecated no-op. A public-edge health probe runs
+    at the end.
 
 When a subset is passed, the seeder is SKIPPED — it expects the full stack
 to be healthy and would either fail or no-op against an incomplete one.
@@ -223,7 +221,6 @@ def parse_args(argv):
                              #        after workspace resolution, against benji's checkout
     state_build = False    # True = --state=build; build state.tar.gz fresh from
                            #        benji-state + aramb-skills (implies --agent)
-    public_mode = False
     services = []
 
     i = 0
@@ -231,8 +228,10 @@ def parse_args(argv):
     while i < n:
         arg = argv[i]
         if arg == "--public":
-            public_mode = True
-            profiles.append("public")
+            # Deprecated no-op: the public cloudflared edge is always on and
+            # browser/agent URLs are always the public host. Accepted so old
+            # invocations don't error.
+            _err("note: --public is now the default (cloudflared always on); flag ignored")
             i += 1
         elif arg == "--batch":
             if i + 1 >= n or argv[i + 1] == "":
@@ -306,7 +305,7 @@ def parse_args(argv):
         batch_arg=batch_arg, profiles=profiles, agent_build=agent_build,
         browser_build=browser_build, state_tarball=state_tarball,
         state_defaulted=state_defaulted, state_build=state_build,
-        public_mode=public_mode, services=services,
+        services=services,
     )
 
 
@@ -319,7 +318,6 @@ def main(argv=None):
     state_tarball = a["state_tarball"]
     state_defaulted = a["state_defaulted"]
     state_build = a["state_build"]
-    public_mode = a["public_mode"]
     services = a["services"]
 
     # --state (any form) bakes a state tarball into the benji image, so it forces
@@ -332,22 +330,6 @@ def main(argv=None):
     if state_tarball and not _abs_ctx(state_tarball).is_file():
         _err(f"error: state tarball not found: {state_tarball}")
         raise SystemExit(2)
-
-    # --public: flip every outward-facing URL from http://<svc>.localhost:8080
-    # to https://<svc>.srclode.online. The compose interpolates these with
-    # local defaults (${STACK_SCHEME:-http} etc.), so exporting here — before
-    # any `docker compose` call — is the entire mode switch. STACK_PORT uses
-    # the `-` (set-and-empty is honored) form so exporting "" drops the :8080.
-    if public_mode:
-        os.environ["STACK_SCHEME"] = "https"
-        os.environ["STACK_DOMAIN"] = "srclode.online"
-        os.environ["STACK_PORT"] = ""
-        os.environ["STACK_TUNNEL_DOMAIN"] = "srclode.online"
-        # raksha's BACKEND_URL defaults to the local localhost/raksha passthrough;
-        # in public mode it's the real https host (already a valid provider redirect
-        # host + reachable email-link host), so override the local default.
-        os.environ["STACK_RAKSHA_BACKEND_URL"] = "https://raksha.srclode.online"
-        s.log("public mode: outward URLs = https://*.srclode.online (cloudflared profile on)")
 
     # Honored by every `docker compose` call in this script + tail-logs.sh.
     if profiles:
@@ -480,48 +462,25 @@ def main(argv=None):
     s.log("stack ready")
     s.compose("ps", "--format", "table {{.Service}}\t{{.Status}}")
 
-    # ── mode report ────────────────────────────────────────────────────────
-    # Same discovery trick as seed.sh: what's actually running decides what
-    # gets said — profiles, subsets, and future services need no edits here.
-    running = s.compose("ps", "--services", "--status", "running,restarting,created",
-                        capture=True, check=False).stdout.split()
-
-    def has(svc):
-        return svc in running
-
+    # ── public-edge report ───────────────────────────────────────────────────
     print()
-    if public_mode:
-        # Healthy wildcard: the probe host falls through traefik's catch-all to
-        # louie's HTTP proxy, which 404s an unknown tunnel name. 530 = the CF
-        # wildcard DNS CNAME is gone (restore command in CLAUDE.md).
-        probe = f"probe-{random.randint(0, 32767)}-{random.randint(0, 32767)}.srclode.online"
-        code = s.run(
-            ["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}", "--max-time", "10",
-             f"https://{probe}"],
-            capture=True, check=False,
-        ).stdout.strip() or "000"
-        if code == "404":
-            s.log(f"public edge healthy (https://{probe} → 404 via tunnel)")
-        elif code == "530":
-            s.log("WARNING: CF edge returned 530 — wildcard DNS CNAME missing; "
-                  "see CLAUDE.md 'ingress rule ≠ DNS routing'")
-        else:
-            s.log(f"WARNING: unexpected {code} probing https://{probe} — check cloudflared logs")
+    # cloudflared is always on. Probe the public edge: a random subdomain falls
+    # through traefik's catch-all to louie's HTTP proxy, which 404s an unknown
+    # tunnel name. 530 = the CF wildcard DNS CNAME is gone (restore command in
+    # CLAUDE.md).
+    probe = f"probe-{random.randint(0, 32767)}-{random.randint(0, 32767)}.srclode.online"
+    code = s.run(
+        ["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}", "--max-time", "10",
+         f"https://{probe}"],
+        capture=True, check=False,
+    ).stdout.strip() or "000"
+    if code == "404":
+        s.log(f"public edge healthy (https://{probe} → 404 via tunnel)")
+    elif code == "530":
+        s.log("WARNING: CF edge returned 530 — wildcard DNS CNAME missing; "
+              "see CLAUDE.md 'ingress rule ≠ DNS routing'")
     else:
-        s.log("local mode (no --public) — everything above runs; only inbound-from-internet paths are off:")
-        if has("notify"):
-            print("    ⚠ notify: outbound email OK; Resend delivery webhooks won't arrive")
-        if has("chil"):
-            print("    ⚠ chil: Slack events + blob attachments OK (socket mode); OAuth install, "
-                  "Telegram webhook, and kind=url artifact links for other workspace members need --public")
-        if has("gitana"):
-            print("    ⚠ gitana: GitHub App install/OAuth callbacks need --public")
-        if has("toolkit-proxy"):
-            print("    ⚠ toolkit-proxy: Composio connect callbacks need --public")
-        if has("mcp-server"):
-            print("    ℹ mcp-server: reachable by MCP clients on this host only")
-        if has("louie"):
-            print("    ℹ louie: tunnel URLs (*.tunnel.localhost:8080) resolve on this host only")
+        s.log(f"WARNING: unexpected {code} probing https://{probe} — check cloudflared logs")
         print("    ingress: http://<svc>.localhost:8080 (traefik dashboard: http://traefik.localhost:8080)")
     # console-web is a static caddy build behind traefik (no dev server / HMR;
     # rebuild with `stack up console-web` to pick up code changes).

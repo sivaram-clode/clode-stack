@@ -36,26 +36,24 @@
 #
 # Ingress. traefik is the single HTTP entry point for the stack — host
 # port 8080, Host-header routing via docker-provider labels on each
-# service: `<svc>.localhost:8080` locally, `<svc>.srclode.online` when
-# the CF tunnel fronts it (`--public`). Every URL a browser, agent, or
-# external party consumes uses one of those two grammars; service↔service
-# traffic stays on plain docker DNS (`http://<svc>:<port>`, the
-# x-service-urls anchor).
+# service: `<svc>.localhost:8080` for local browsing, `<svc>.srclode.online`
+# via the always-on CF tunnel. Every URL a browser, agent, or external party
+# consumes is the public `.srclode.online` host; service↔service traffic stays
+# on plain docker DNS (`http://<svc>:<port>`, the x-service-urls anchor).
 #
-# S3 endpoints. Consumers whose presigned URLs leave the container
-# (brahmi attachments, intervix + ikki recordings, vova audio) sign against
-# the traefik hostname: `${STACK_SCHEME:-http}://minio.${STACK_DOMAIN:-localhost}`
-# `${STACK_PORT-:8080}` — the shared `x-s3-common` / `x-minio-endpoint`
-# anchors. SigV4 signs the Host header, so the same URL must be valid from
-# the host and in-network — traefik's network aliases (minio.localhost +
-# minio.srclode.online on the `clode` bridge) make the signer's dial and the
-# browser's fetch hit the same origin. databend is the sole backend that uses
-# `http://minio:9000` direct (internal storage engine, never presigned). The
-# old minio-proxy nginx is
-# gone: its one job (restoring the CF-edge-mangled Accept-Encoding header
-# that breaks aws-sdk-go-v2 SigV4) is now the `ae-identity` traefik
-# middleware on the minio router. Full history: CLAUDE.md's Cloudflare
-# gotcha.
+# S3 endpoints — split by caller. Every consumer (brahmi attachments,
+# intervix + ikki recordings, vova audio) holds TWO endpoints: OPERATIONS
+# always go in-cluster over plaintext `http://minio:9000` (never traefik/CF),
+# and PRESIGNED URLs are signed against the public CF host
+# `https://minio.srclode.online`. Presigning is a local SigV4 computation, so a
+# presign-only client mints URLs whose Host the browser/agent that fetches them
+# resolves (traefik's minio router serves them; network aliases make in-network
+# fetches resolve too). See the `x-minio-op-endpoint` / `x-minio-presign-endpoint`
+# / `x-s3-common` anchors. databend stays on `http://minio:9000` direct (internal
+# storage engine, never presigned). The `ae-identity` traefik middleware (it
+# pinned Accept-Encoding to keep aws-sdk-go-v2 SigV4 valid across the CF edge) is
+# now a no-op safety net — SDK operations no longer cross CF, and presigned
+# fetches don't sign Accept-Encoding. Full history: CLAUDE.md's Cloudflare gotcha.
 #
 # ENVIRONMENT=local. Every service on glafa rc33+ must set it — the
 # secret loader rejects plain-text DB_PASSWORD outside `local`/`dev`.
@@ -105,22 +103,36 @@ x-databend-common: &databend-common
   DATABEND_USER:     databend
   DATABEND_PASSWORD: databend
 
-# MinIO S3 origin. Presigned GET/PUT URLs are SigV4-signed against the Host,
-# so any URL that leaves the container must be signed against a hostname the
-# host browser AND in-network callers both resolve — the traefik minio origin
-# (network aliases minio.localhost + minio.srclode.online on the `clode`
-# bridge), never the internal minio:9000. Single definition, referenced by the
-# s3 anchor below and by vova (which reads its own S3_* names). databend is the
-# sole S3 backend that stays on http://minio:9000 direct — internal storage
-# engine, never presigned — with its own AWS_S3_* env inline on its block.
-x-minio-endpoint: &minio-endpoint ${STACK_SCHEME:-http}://minio.${STACK_DOMAIN:-localhost}${STACK_PORT-:8080}
+# MinIO S3 — split by CALLER, not by mode. There are two endpoints and every
+# consumer holds BOTH:
+#
+#   * OPERATIONS (PutObject/GetObject/HeadObject/…) always go in-cluster over
+#     plaintext http://minio:9000 — never through traefik/CF. This is what broke
+#     before: an aws-sdk client pointed at the public host dialed traefik's :443
+#     websecure (self-signed) or the CF edge and the SDK operation failed. Ops
+#     have no business leaving the bridge, so they never do.
+#   * PRESIGN endpoint is the PUBLIC CF host (https://minio.srclode.online).
+#     Presigning is a pure local SigV4 computation — no network call — so a
+#     presign-only client pointed here mints URLs whose Host resolves for the
+#     browser/agent that fetches them (the traefik minio router serves them,
+#     network-aliased so in-network fetches resolve too). SigV4 signs the Host,
+#     so the presign Host must equal the fetch Host — the public one.
+#
+# Each service builds a SECOND, presign-only s3.Client off the presign endpoint
+# (see per-repo S3 config); ops stay on the operational client. databend is the
+# lone exception — internal storage engine, never presigned — and keeps its own
+# http://minio:9000 AWS_S3_* env inline on its block.
+x-minio-op-endpoint:      &minio-op-endpoint      http://minio:9000
+x-minio-presign-endpoint: &minio-presign-endpoint https://minio.srclode.online
 
 # Shared S3 client config for the aws-sdk consumers (brahmi, intervix, ikki).
 # Static minio creds + blank AWS_PROFILE (the sibling .env files pin an SSO
 # profile that does not exist in-container and errors the SDK). Path-style is
-# selected in each service's own code off S3_ENDPOINT_URL.
+# selected in each service's own code off S3_ENDPOINT_URL. S3_PRESIGN_ENDPOINT_URL
+# is the public host the second (presign-only) client signs against.
 x-s3-common: &s3-common
-  S3_ENDPOINT_URL:       *minio-endpoint
+  S3_ENDPOINT_URL:         *minio-op-endpoint
+  S3_PRESIGN_ENDPOINT_URL: *minio-presign-endpoint
   AWS_ACCESS_KEY_ID:     minioadmin
   AWS_SECRET_ACCESS_KEY: minioadmin
   AWS_PROFILE:           ""
@@ -128,6 +140,12 @@ x-s3-common: &s3-common
 # Cross-service base URLs. Each consumer reads the subset it cares about;
 # `BRAHMI_URL` vs `BRAHMI_BASE_URL` etc. — different services chose
 # different env names, so we set both.
+#
+# Split by CALLER. The internal names (`*_URL` / `*_BASE_URL` / `*_INTERNAL_URL`)
+# stay in-cluster (`http://<svc>:<port>`) for service↔service traffic. The
+# `*_EXTERNAL_URL` family is what agents/browsers see, so it's the public
+# `.srclode.online` host — uniform whether the agent is on-bridge or off-cluster
+# (the srclode network aliases on traefik resolve it in-cluster without a CF hop).
 x-service-urls: &service-urls
   AUTH_ISSUER:                http://raksha:8080
   RAKSHA_BASE_URL:            http://raksha:8080
@@ -135,7 +153,7 @@ x-service-urls: &service-urls
   RAKSHA_INTERNAL_URL:        http://raksha:8080
   JUMBO_BASE_URL:             http://jumbo:8080
   JUMBO_URL:                  http://jumbo:8080
-  JUMBO_EXTERNAL_URL:         http://jumbo:8080
+  JUMBO_EXTERNAL_URL:         https://jumbo.srclode.online
   # cha-ching's name for the same target (cloud-quota pushes to jumbo's
   # /internal surface; unset = client nil = "jumbo client not wired").
   JUMBO_INTERNAL_URL:         http://jumbo:8080
@@ -153,12 +171,12 @@ x-service-urls: &service-urls
   CHA_CHING_URL:              http://cha-ching:8086
   MANG_PROXY_URL:             http://mang-proxy:8080
   MANG_PROXY_BASE_URL:        http://mang-proxy:8080
-  MANG_PROXY_EXTERNAL_URL:    http://mang-proxy:8080
+  MANG_PROXY_EXTERNAL_URL:    https://mang-proxy.srclode.online
   TOOLKIT_PROXY_BASE_URL:     http://toolkit-proxy:8080/cli
-  TOOLKIT_PROXY_EXTERNAL_URL: http://toolkit-proxy:8080/cli
+  TOOLKIT_PROXY_EXTERNAL_URL: https://toolkit-proxy.srclode.online/cli
   CHIL_BASE_URL:              http://chil:8080
   CHIL_MCP_URL:               http://chil:8080/api/v1/mcp
-  CHIL_MCP_EXTERNAL_URL:      http://chil:8080/api/v1/mcp
+  CHIL_MCP_EXTERNAL_URL:      https://chil.srclode.online/api/v1/mcp
   SKILLS_REGISTRY_URL:        http://skills-registry:8080
   SKILLS_REGISTRY_BASE_URL:   http://skills-registry:8080
   GITANA_URL:                 http://gitana:8080
@@ -326,11 +344,10 @@ services:
   # Two Host families per router: `<svc>.localhost` (resolves to loopback
   # on the host for free — systemd-resolved / browsers synthesize
   # *.localhost per RFC 6761) and `<svc>.srclode.online` (only reachable
-  # when the cloudflared `public` profile is up; its single ingress rule
-  # forwards *.srclode.online here). Services never exposed through CF
-  # historically (mock-services, ikki, minio-console, traefik dashboard) get a
-  # `.localhost` rule ONLY — do not add srclode rules to them, that would
-  # publish unauthenticated admin surfaces in --public mode.
+  # via the always-on cloudflared edge; its single ingress rule forwards
+  # *.srclode.online here). Unauthenticated admin surfaces (mock-services,
+  # minio-console, traefik dashboard) get a `.localhost` rule ONLY — do not add
+  # srclode rules to them. (ikki IS public: browsers/agents dial it off-cluster.)
   #
   # network aliases: containers can't resolve *.localhost to the host, so
   # the names that containers themselves dial (S3 signing hosts, OAuth
@@ -399,6 +416,13 @@ services:
           - intervix.localhost
           - intervix.srclode.online
           - ikki.localhost
+          - ikki.srclode.online
+          # agent-facing *_EXTERNAL_URL targets — public host resolves in-cluster
+          # too, so on-bridge agents skip the CF edge round-trip.
+          - jumbo.srclode.online
+          - mang-proxy.srclode.online
+          - toolkit-proxy.srclode.online
+          - chil.srclode.online
           - mock-services.localhost
     healthcheck:
       test: ["CMD", "traefik", "healthcheck", "--ping"]
@@ -553,7 +577,10 @@ services:
       # same. Register `http://localhost:8080/raksha/auth/oauth/callback/google`
       # in the Google client. --public (up.sh) overrides this to
       # https://raksha.srclode.online (already a valid provider host).
-      BACKEND_URL: ${STACK_RAKSHA_BACKEND_URL:-http://localhost:8080/raksha}
+      # Dev-console login flow (human browser + oauth-mock, both local): the
+      # console reaches raksha through the localhost:8080/raksha passthrough
+      # router. Stays local by design — not an agent/browser-automation surface.
+      BACKEND_URL: http://localhost:8080/raksha
       # FE landing for the OAuth BE-redirect callback (success fallback + error
       # page). console-web is the live frontend on :3001 and routes on /login.
       DEFAULT_RETURN_TO: http://localhost:3001/login
@@ -748,6 +775,11 @@ services:
       # and recordings to vova. Without this, the console voice picker shows
       # "No voices available" (brahmi short-circuits to an empty list).
       VOVA_URL:              http://vova:8080
+      # Agent-facing brahmi URL. e2b sandboxes run in E2B's CLOUD and cannot reach
+      # the internal http://brahmi:8080 — point their kairo call-home (WS + MCP) at
+      # the public cloudflared edge (*.srclode.online → traefik → brahmi). agentBrahmiURL()
+      # bakes this into the sandbox env as BRAHMI_URL; VM agents use it too (via the tunnel).
+      AGENT_BRAHMI_URL:      https://brahmi.srclode.online
     volumes:
       # VM call-home instance-identity trust anchor (AGENT_VM_IDENTITY_CERT_PATH):
       # brahmi verifies the mock IMDS's signed document against cert.pem. The
@@ -848,7 +880,7 @@ services:
       # redirect URLs and Telegram requires a public https webhook, so
       # the install flows only complete under `--public`; socket-mode
       # event delivery and blob attachment upload work fully local.
-      BACKEND_URL:  ${STACK_SCHEME:-http}://chil.${STACK_DOMAIN:-localhost}${STACK_PORT-:8080}
+      BACKEND_URL:  https://chil.srclode.online
       # First-user org onboarding (slack/org-onboarding-flow.md): at
       # install-complete, chil's OnInstallComplete calls brahmi
       # /api/v1/onboarding to provision the workspace public project +
@@ -904,7 +936,7 @@ services:
       # sends work, inbound webhooks can't arrive; --public makes it
       # https://notify.srclode.online. In-network callers keep dialing
       # http://notify:8080 from the *service-urls anchor.
-      BACKEND_URL: ${STACK_SCHEME:-http}://notify.${STACK_DOMAIN:-localhost}${STACK_PORT-:8080}
+      BACKEND_URL: https://notify.srclode.online
       FRONTEND_URL: http://localhost:3000
       # Local Resend keys stay unset by default; sends fail-fast in the
       # outbox worker with a clean upstream error until you populate them.
@@ -948,7 +980,7 @@ services:
       # a container on the `clode` bridge (via mock-services/pool), so the
       # traefik alias serves agent and browser from the same origin — no
       # tunnel hop for either.
-      BACKEND_URL:  ${STACK_SCHEME:-http}://intervix.${STACK_DOMAIN:-localhost}${STACK_PORT-:8080}
+      BACKEND_URL:  https://intervix.srclode.online
       FRONTEND_URL: http://localhost:3000
       COOKIE_SECURE: "false"
       LLM_PROVIDER: brahmi
@@ -973,7 +1005,7 @@ services:
       # /auth/oauth/token. traefik serves both: the host resolves
       # raksha.localhost to loopback, containers resolve it via the
       # network alias — same origin, no host-mapping tricks needed.
-      RAKSHA_PUBLIC_BASE_URL:      ${STACK_SCHEME:-http}://raksha.${STACK_DOMAIN:-localhost}${STACK_PORT-:8080}
+      RAKSHA_PUBLIC_BASE_URL:      http://raksha.localhost:8080
       INTERVIX_OAUTH_CLIENT_ID:    intervix-local
       INTERVIX_OAUTH_REDIRECT_URI: http://localhost:3001/auth/callback
       INTERVIX_OAUTH_SCOPE:        aramb
@@ -1028,7 +1060,7 @@ services:
       DB_NAME: vova
       DB_SEARCH_PATH: public
       PORT: 8080
-      BACKEND_URL: ${STACK_SCHEME:-http}://vova.${STACK_DOMAIN:-localhost}${STACK_PORT-:8080}
+      BACKEND_URL: https://vova.srclode.online
       # ../vova/.env has REDIS_URL commented out, so vova's composeRedisURL()
       # falls through to the discrete REDIS_HOST/REDIS_PORT/REDIS_DB/
       # REDIS_PASSWORD path — the latter two come from *redis-common.
@@ -1044,11 +1076,11 @@ services:
       # creds to the S3 client only — Bedrock keeps the default AWS chain
       # (AWS_PROFILE / region / secrets from ../vova/.env), which is why vova
       # keeps its own S3_* creds instead of merging *s3-common's AWS_* names.
-      # Endpoint is the shared traefik minio origin (*minio-endpoint): vova
-      # presigns GET URLs the browser streams for audio playback, so the signed
-      # Host must resolve from the browser as well as in-network.
+      # Ops go in-cluster (minio:9000); S3_PRESIGN_ENDPOINT is the public CF host
+      # vova presigns GET URLs against — the browser streams audio from there.
       S3_BUCKET:            vova-audio
-      S3_ENDPOINT:          *minio-endpoint
+      S3_ENDPOINT:          *minio-op-endpoint
+      S3_PRESIGN_ENDPOINT:  *minio-presign-endpoint
       S3_ACCESS_KEY_ID:     minioadmin
       S3_SECRET_ACCESS_KEY: minioadmin
     labels:
@@ -1142,9 +1174,9 @@ services:
       HAS_DB: "true"
       DB_NAME: ikki
       RECORDING_ENABLED: "true"
-      # In-house recorder mints part URLs against ikki over the clode bridge —
-      # the browser container dials ikki by service name (ikki's HTTP PORT).
-      RECORDING_MINT_URL_BASE: http://ikki:7602
+      # In-house recorder mints part URLs against ikki. Browser/agent-facing, so
+      # it's the public host — an off-cluster recorder reaches it too.
+      RECORDING_MINT_URL_BASE: https://ikki.srclode.online
       # Local aramb provider targets — ikki's repo .env ships dev-aramb-stub:0
       # placeholders; point them at the real in-stack services (clode bridge).
       ARAMB_JUMBO_BASE_URL: http://jumbo:8080
@@ -1202,18 +1234,16 @@ services:
       # this is cosmetic for steel-only — set anyway for consistency.
       RAKSHA_URL: http://raksha:8080
       # CDP URL returned to clients connecting back to ikki's websocket.
-      # ikki.localhost routes via traefik from host AND containers (alias),
-      # so agent-side and desktop CDP clients share one URL.
-      CDP_BASE_URL: ws://ikki.localhost:8080
-      # The connect-back URL handed to the MCP/agent. ikki/.env defaults this to
-      # ws://localhost:7602, which is unreachable from inside a container (each
-      # container has its own loopback; 7602 isn't published to the host either).
-      # Override with the traefik alias so the benji agent VM can dial it too.
-      CDP_PUBLIC_BASE_URL: ws://ikki.localhost:8080
-      # Extension (vault_fill/vexor) ext-WS base. Set explicitly — it otherwise only
-      # falls back to CDP_PUBLIC_BASE_URL — so the in-container extension's ext_ws_url
-      # is populated; ikki.localhost resolves from the browser container via traefik.
-      EXT_WS_PUBLIC_BASE_URL: ws://ikki.localhost:8080
+      # Browser/agent-facing → the public host, so on-bridge and off-cluster
+      # CDP clients share one URL.
+      CDP_BASE_URL: wss://ikki.srclode.online
+      # The connect-back URL handed to the MCP/agent — the public host so the
+      # benji agent (VM or off-cluster) can dial it.
+      CDP_PUBLIC_BASE_URL: wss://ikki.srclode.online
+      # Extension (vault_fill/vexor) ext-WS base. Set explicitly — it otherwise
+      # only falls back to CDP_PUBLIC_BASE_URL — so the in-container extension's
+      # ext_ws_url is populated with the public host.
+      EXT_WS_PUBLIC_BASE_URL: wss://ikki.srclode.online
       # S3 endpoint + creds come from *s3-common (traefik minio origin, so the
       # presigned recording GET URLs ikki mints resolve from the host browser).
       # STORAGE_BUCKET/REGION are ikki's per-service overrides: the bucket holds
@@ -1225,9 +1255,10 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
     labels:
-      # local-only — ikki was never CF-exposed; do not add a srclode rule.
+      # Browser/agent-facing — CF-exposed so off-cluster browsers and agents
+      # reach ikki's HTTP + CDP/ext WebSockets at the same public host.
       - traefik.enable=true
-      - traefik.http.routers.ikki.rule=Host(`ikki.localhost`)
+      - traefik.http.routers.ikki.rule=Host(`ikki.localhost`) || Host(`ikki.srclode.online`)
       - traefik.http.services.ikki.loadbalancer.server.port=7602
     depends_on:
       redis: { condition: service_healthy }
@@ -1281,14 +1312,13 @@ services:
       # in-stack raksha so JWTs minted from raksha's dev endpoint
       # validate here.
       AUTH_ISSUER:        http://raksha:8080
-      # HTTP proxy — wildcard subdomain routing. Locally assigned names
-      # come back as `<name>.tunnel.localhost` (resolves to loopback on
-      # the host → traefik → the catch-all router below → louie:8280).
-      # Under --public, STACK_TUNNEL_DOMAIN=srclode.online restores
-      # `<name>.srclode.online` via the CF wildcard. Tunnel URLs resolve
-      # on the host only in local mode — docker DNS can't wildcard-alias.
+      # HTTP proxy — wildcard subdomain routing. Shareable tunnel URLs are a
+      # browser/agent/external surface, so they're always public: the broker
+      # assigns `<name>.srclode.online`, served by the CF wildcard → traefik →
+      # the catch-all router below → louie:8280 (network-aliased so in-network
+      # fetches resolve too).
       HTTP_PROXY_ENABLED: "true"
-      HTTP_PROXY_DOMAIN:  ${STACK_TUNNEL_DOMAIN:-tunnel.localhost}
+      HTTP_PROXY_DOMAIN:  srclode.online
       HTTP_PROXY_PORT:    "8280"
       # Syntho — the residential-proxy SOCKS5 data plane. Pre-wired but kept
       # OFF locally (../louie/.env ships it on with prod Evomi keys we don't
@@ -1543,7 +1573,7 @@ services:
       # Origin advertised in the resource-metadata doc + 401 challenge.
       # Local: host-side MCP clients (Claude Code on this machine) resolve
       # mcp-server.localhost:8080. --public: real external clients via CF.
-      PUBLIC_BASE_URL:   ${STACK_SCHEME:-http}://mcp-server.${STACK_DOMAIN:-localhost}${STACK_PORT-:8080}
+      PUBLIC_BASE_URL:   https://mcp-server.srclode.online
     labels:
       - traefik.enable=true
       - traefik.http.routers.mcp-server.rule=Host(`mcp-server.localhost`) || Host(`mcp-server.srclode.online`)
@@ -1865,7 +1895,7 @@ services:
   # mounted at /secrets; joins the `clode` bridge to resolve `traefik`.
   # ------------------------------------------------------------------
   cloudflared:
-    profiles: [public]
+    # Always on — the public edge for every browser/agent-facing surface.
     image: cloudflare/cloudflared:latest
     # Run as root inside the container so it can read ~/.cloudflared (mode 700
     # on the host). The container has no published ports, so this is safe.
