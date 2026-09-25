@@ -39,7 +39,7 @@
 # service: `<svc>.localhost:8080` for local browsing, `<svc>.srclode.online`
 # via the always-on CF tunnel. Every URL a browser, agent, or external party
 # consumes is the public `.srclode.online` host; service↔service traffic stays
-# on plain docker DNS (`http://<svc>:<port>`, the x-service-urls anchor).
+# on plain docker DNS (`http://<svc>:<port>`, via the service address book).
 #
 # S3 endpoints — split by caller. Every consumer (brahmi attachments,
 # intervix + ikki recordings, vova audio) holds TWO endpoints: OPERATIONS
@@ -137,60 +137,44 @@ x-s3-common: &s3-common
   AWS_SECRET_ACCESS_KEY: minioadmin
   AWS_PROFILE:           ""
 
-# Cross-service base URLs. Each consumer reads the subset it cares about;
-# `BRAHMI_URL` vs `BRAHMI_BASE_URL` etc. — different services chose
-# different env names, so we set both.
+# ── Service address book ───────────────────────────────────────────────
+# One anchor per endpoint VALUE. Change a URL here and every service that
+# references it updates. Each service's own `environment:` block lists ONLY the
+# URL vars it actually reads, aliasing these — so a service block documents its
+# real cross-service dependencies: nothing over-injected, nothing hidden behind
+# a generated file.
 #
-# Split by CALLER. The internal names (`*_URL` / `*_BASE_URL` / `*_INTERNAL_URL`)
-# stay in-cluster (`http://<svc>:<port>`) for service↔service traffic. The
-# `*_EXTERNAL_URL` family is what agents/browsers see, so it's the public
-# `.srclode.online` host — uniform whether the agent is on-bridge or off-cluster
-# (the srclode network aliases on traefik resolve it in-cluster without a CF hop).
-x-service-urls: &service-urls
-  AUTH_ISSUER:                http://raksha:8080
-  RAKSHA_BASE_URL:            http://raksha:8080
-  # aramb-gateway's name for the same target (its config.go requires it).
-  RAKSHA_INTERNAL_URL:        http://raksha:8080
-  JUMBO_BASE_URL:             http://jumbo:8080
-  JUMBO_URL:                  http://jumbo:8080
-  JUMBO_EXTERNAL_URL:         https://jumbo.srclode.online
-  # cha-ching's name for the same target (cloud-quota pushes to jumbo's
-  # /internal surface; unset = client nil = "jumbo client not wired").
-  JUMBO_INTERNAL_URL:         http://jumbo:8080
-  BRAHMI_URL:                 http://brahmi:8080
-  BRAHMI_BASE_URL:            http://brahmi:8080
-  BRAHMI_WS_URL:              ws://brahmi:8080
-  # Points brahmi (and any inheritor) at the real pool-manager service, which
-  # runs behind the `pool` profile (unreachable until `--profile pool` is up).
-  POOL_MANAGER_URL:           http://pool-manager:8080
-  CHACHING_URL:               http://cha-ching:8086
-  # mang-proxy's name for the same target (usage-ledger POST /api/v1/usage-events
-  # /batch). Empty = the whole usageq pipeline is disabled (no queue, no workers,
-  # no enqueue); set it to turn the ledger on. Auth for the post comes from the
-  # CHA_CHING_ADMIN_* pair in *admin-ids (raksha-minted SA token).
-  CHA_CHING_URL:              http://cha-ching:8086
-  MANG_PROXY_URL:             http://mang-proxy:8080
-  MANG_PROXY_BASE_URL:        http://mang-proxy:8080
-  MANG_PROXY_EXTERNAL_URL:    https://mang-proxy.srclode.online
-  TOOLKIT_PROXY_BASE_URL:     http://toolkit-proxy:8080/cli
-  TOOLKIT_PROXY_EXTERNAL_URL: https://toolkit-proxy.srclode.online/cli
-  CHIL_BASE_URL:              http://chil:8080
-  CHIL_MCP_URL:               http://chil:8080/api/v1/mcp
-  CHIL_MCP_EXTERNAL_URL:      https://chil.srclode.online/api/v1/mcp
-  SKILLS_REGISTRY_URL:        http://skills-registry:8080
-  SKILLS_REGISTRY_BASE_URL:   http://skills-registry:8080
-  GITANA_URL:                 http://gitana:8080
-  # toolkit-proxy reads GITANA_BASE_URL to route the github toolkit through
-  # gitana (user-OAuth flow + credential broker) instead of Composio. Same
-  # docker-DNS target as GITANA_URL — separate env var because toolkit-proxy's
-  # config (internal/config/user_demo_config.go) looks for this exact name.
-  GITANA_BASE_URL:            http://gitana:8080
-  IKKI_API_URL:               http://ikki:7602
-  INTERVIX_URL:               http://intervix:8080
-  INTERVIX_BASE_URL:          http://intervix:8080
-  NOTIFY_URL:                 http://notify:8080
-  NOTIFY_BASE_URL:            http://notify:8080
-  IKKI_GRPC_ADDR:             ikki:7603
+# Split by CALLER: in-cluster names stay on docker DNS (`http://<svc>:<port>`);
+# the `-public` twins are the `.srclode.online` host agents/browsers see (the
+# services' `*_EXTERNAL_URL` vars). The `.srclode.online` twins resolve
+# in-cluster too via traefik network aliases, so on-bridge callers skip the CF
+# hop. Naming variants (e.g. AUTH_ISSUER / RAKSHA_BASE_URL / RAKSHA_INTERNAL_URL
+# all → raksha) alias the same entry; consumers picked different env names.
+x-url-raksha:               &url-raksha               http://raksha:8080
+x-url-jumbo:                &url-jumbo                http://jumbo:8080
+x-url-jumbo-public:         &url-jumbo-public         https://jumbo.srclode.online
+x-url-brahmi:               &url-brahmi               http://brahmi:8080
+x-url-brahmi-ws:            &url-brahmi-ws            ws://brahmi:8080
+x-url-pool-manager:         &url-pool-manager         http://pool-manager:8080
+x-url-cha-ching:            &url-cha-ching            http://cha-ching:8086
+x-url-mang-proxy:           &url-mang-proxy           http://mang-proxy:8080
+x-url-mang-proxy-public:    &url-mang-proxy-public    https://mang-proxy.srclode.online
+x-url-toolkit-proxy:        &url-toolkit-proxy        http://toolkit-proxy:8080/cli
+x-url-toolkit-proxy-public: &url-toolkit-proxy-public https://toolkit-proxy.srclode.online/cli
+x-url-chil:                 &url-chil                 http://chil:8080
+x-url-chil-mcp:             &url-chil-mcp             http://chil:8080/api/v1/mcp
+x-url-chil-mcp-public:      &url-chil-mcp-public      https://chil.srclode.online/api/v1/mcp
+x-url-skills-registry:      &url-skills-registry      http://skills-registry:8080
+x-url-gitana:               &url-gitana               http://gitana:8080
+x-url-ikki-api:             &url-ikki-api             http://ikki:7602
+x-url-ikki-grpc:            &url-ikki-grpc            ikki:7603
+x-url-notify:               &url-notify               http://notify:8080
+
+# ── Framework env injected into EVERY glafa service, regardless of what it
+# dials. AUTH_ISSUER is env.MustGetEnv in glafa's shared config — a service
+# fatals at boot without it — so it's global, not scoped like the URLs above.
+x-framework: &framework
+  AUTH_ISSUER: *url-raksha
 
 # ----------------------------------------------------------------------
 # Admin / pool-owner identity. ONE UUID drives every "who owns the
@@ -563,7 +547,10 @@ services:
     command: ["sh", "-c", "/app/raksha migrate && exec /app/raksha serve"]
     env_file: [../raksha/.env]
     environment:
-      <<: [*db-common, *redis-common, *service-urls, *allowed-origins, *admin-ids]
+      <<: [*db-common, *redis-common, *allowed-origins, *admin-ids, *framework]
+      JUMBO_URL:    *url-jumbo
+      CHACHING_URL: *url-cha-ching
+      NOTIFY_URL:   *url-notify
       DB_NAME: raksha
       PORT: 8080
       JWT_ISSUER: http://raksha:8080
@@ -602,7 +589,7 @@ services:
       # GITHUB_OAUTH_BASE_URL override, so GitHub stays real.)
       GOOGLE_OAUTH_BASE_URL: http://mock-services.localhost:8080/oauth-mock
       # Route raksha's transactional emails through the local notify service.
-      # NOTIFY_URL comes from *service-urls (http://notify:8080), NOTIFY_ADMIN_ORG_ID
+      # NOTIFY_URL = *url-notify (http://notify:8080); NOTIFY_ADMIN_ORG_ID
       # from *admin-ids, and raksha mints the SA token in-process against the
       # org seeded by scripts/seed.sh.
       #
@@ -657,7 +644,8 @@ services:
     command: ["sh", "-c", "/app/jumbo migrate && exec /app/jumbo serve"]
     env_file: [../jumbo/.env]
     environment:
-      <<: [*db-common, *service-urls, *allowed-origins]
+      <<: [*db-common, *allowed-origins, *framework]
+      GITANA_BASE_URL: *url-gitana
       DB_NAME: jumbo
       PORT: 8080
       # Override jumbo's default `ghcr.io/clode-labs` trusted-image prefix
@@ -708,11 +696,12 @@ services:
     # bare `./akela` (prints usage), so it is overridden here.
     command: ["/app/akela", "serve"]
     # env_file supplies akela's framework config + the Infisical credentials
-    # (INFISICAL_*). The *service-urls / *allowed-origins anchors below override
-    # the .env's localhost-pointing AUTH_ISSUER / JUMBO_URL for in-stack routing.
+    # (INFISICAL_*). The address-book vars / *allowed-origins below override
+    # the .env's localhost-pointing AUTH_ISSUER / JUMBO for in-stack routing.
     env_file: [../akela/.env]
     environment:
-      <<: [*service-urls, *allowed-origins]
+      <<: [*allowed-origins, *framework]
+      JUMBO_BASE_URL: *url-jumbo
       HOST: 0.0.0.0
       PORT: 8080
       HAS_DB: "false"
@@ -755,7 +744,25 @@ services:
       # *s3-common precedes *arambvm so the minio creds win over arambvm's
       # mock-services test/test creds (mock-services ignores them); brahmi's one AWS creds
       # pair thus serves both its S3 client and the mock EC2 client.
-      <<: [*db-common, *s3-common, *redis-common, *service-urls, *admin-ids, *allowed-origins, *arambvm]
+      <<: [*db-common, *s3-common, *redis-common, *admin-ids, *allowed-origins, *arambvm, *framework]
+      RAKSHA_BASE_URL:            *url-raksha
+      JUMBO_BASE_URL:             *url-jumbo
+      JUMBO_URL:                  *url-jumbo
+      JUMBO_EXTERNAL_URL:         *url-jumbo-public
+      BRAHMI_URL:                 *url-brahmi
+      POOL_MANAGER_URL:           *url-pool-manager
+      CHA_CHING_URL:              *url-cha-ching
+      MANG_PROXY_BASE_URL:        *url-mang-proxy
+      MANG_PROXY_EXTERNAL_URL:    *url-mang-proxy-public
+      TOOLKIT_PROXY_BASE_URL:     *url-toolkit-proxy
+      TOOLKIT_PROXY_EXTERNAL_URL: *url-toolkit-proxy-public
+      CHIL_BASE_URL:              *url-chil
+      CHIL_MCP_URL:               *url-chil-mcp
+      CHIL_MCP_EXTERNAL_URL:      *url-chil-mcp-public
+      SKILLS_REGISTRY_URL:        *url-skills-registry
+      SKILLS_REGISTRY_BASE_URL:   *url-skills-registry
+      IKKI_API_URL:               *url-ikki-api
+      NOTIFY_URL:                 *url-notify
       DB_NAME: brahmi
       DB_SEARCH_PATH: public
       PORT: 8080
@@ -821,7 +828,11 @@ services:
     command: ["sh", "-c", "/app/pool-manager migrate && exec /app/pool-manager serve"]
     env_file: [../pool-manager/.env]
     environment:
-      <<: [*db-common, *service-urls, *admin-ids, *allowed-origins]
+      <<: [*db-common, *admin-ids, *allowed-origins, *framework]
+      RAKSHA_BASE_URL: *url-raksha
+      JUMBO_BASE_URL:  *url-jumbo
+      BRAHMI_URL:      *url-brahmi
+      IKKI_GRPC_ADDR:  *url-ikki-grpc
       ENVIRONMENT: local
       DB_NAME: pool-manager
       PORT: 8080
@@ -832,11 +843,11 @@ services:
       # `docker run` + docker-inspect health, bypassing jumbo/narnia/baghira.)
       LOCAL_MODE: "false"
       DOCKER_NETWORK: clode
-      # JUMBO_BASE_URL inherits from the *service-urls anchor (http://jumbo:8080).
+      # JUMBO_BASE_URL = *url-jumbo (http://jumbo:8080).
       # BAGHIRA_BASE_URL points at the always-up mock-services /baghira group.
       BAGHIRA_BASE_URL: http://mock-services:8080/baghira
-      # BRAHMI_URL / BRAHMI_BASE_URL / BRAHMI_WS_URL inherit from the
-      # *service-urls anchor (http://brahmi:8080, ws://brahmi:8080).
+      # BRAHMI_BASE_URL = *url-brahmi; BRAHMI_WS_URL is set inline below
+      # (chil needs the /api/v1/ws path, not the bare ws host).
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
     extra_hosts:
@@ -869,7 +880,11 @@ services:
     command: ["sh", "-c", "/app/chil migrate && exec /app/chil serve"]
     env_file: [../chil/.env]
     environment:
-      <<: [*db-common, *service-urls, *allowed-origins]
+      <<: [*db-common, *allowed-origins, *framework]
+      RAKSHA_BASE_URL:          *url-raksha
+      JUMBO_BASE_URL:           *url-jumbo
+      BRAHMI_BASE_URL:          *url-brahmi
+      SKILLS_REGISTRY_BASE_URL: *url-skills-registry
       ENVIRONMENT: local
       DB_NAME: chil_new
       PORT: 8080
@@ -927,7 +942,7 @@ services:
     command: ["sh", "-c", "/app/notify migrate && exec /app/notify serve"]
     env_file: [../notify/.env]
     environment:
-      <<: [*db-common, *service-urls, *allowed-origins]
+      <<: [*db-common, *allowed-origins, *framework]
       ENVIRONMENT: local
       DB_NAME: notify
       PORT: 8080
@@ -935,7 +950,7 @@ services:
       # delivery events) are registered against. Local mode: outbound
       # sends work, inbound webhooks can't arrive; --public makes it
       # https://notify.srclode.online. In-network callers keep dialing
-      # http://notify:8080 from the *service-urls anchor.
+      # http://notify:8080 (*url-notify in the address book).
       BACKEND_URL: https://notify.srclode.online
       FRONTEND_URL: http://localhost:3000
       # Local Resend keys stay unset by default; sends fail-fast in the
@@ -969,7 +984,10 @@ services:
     command: ["sh", "-c", "/app/intervix migrate && exec /app/intervix serve"]
     env_file: [../intervix/.env]
     environment:
-      <<: [*service-urls, *allowed-origins, *s3-common]
+      <<: [*allowed-origins, *s3-common, *framework]
+      JUMBO_BASE_URL:  *url-jumbo
+      BRAHMI_BASE_URL: *url-brahmi
+      BRAHMI_WS_URL:   *url-brahmi-ws
       ENVIRONMENT: local
       PORT: 8080
       DATABASE_URL: postgres://postgres:postgres@db:5432/intervix?sslmode=disable
@@ -1055,7 +1073,10 @@ services:
     command: ["sh", "-c", "/app/vova migrate && exec /app/vova serve"]
     env_file: [../vova/.env]
     environment:
-      <<: [*db-common, *redis-common, *service-urls, *allowed-origins]
+      <<: [*db-common, *redis-common, *allowed-origins, *framework]
+      RAKSHA_INTERNAL_URL: *url-raksha
+      BRAHMI_BASE_URL:     *url-brahmi
+      CHA_CHING_URL:       *url-cha-ching
       ENVIRONMENT: local
       DB_NAME: vova
       DB_SEARCH_PATH: public
@@ -1121,7 +1142,7 @@ services:
     command: ["sh", "-c", "/app/gitana migrate && exec /app/gitana serve"]
     env_file: [../gitana/.env]
     environment:
-      <<: [*db-common, *service-urls, *allowed-origins]
+      <<: [*db-common, *allowed-origins, *framework]
       ENVIRONMENT: local
       DB_NAME: gitana
       PORT: 8080
@@ -1162,11 +1183,15 @@ services:
       # *admin-ids for ADMIN_USER_IDS — cha-ching's admin usage reads
       # authenticate with an SA token attributed to the raksha-chaching
       # bot user; ikki gates those routes by JWT user.id.
-      <<: [*db-common, *s3-common, *redis-common, *service-urls, *allowed-origins, *admin-ids]
+      <<: [*db-common, *s3-common, *redis-common, *allowed-origins, *admin-ids, *framework]
+      JUMBO_BASE_URL: *url-jumbo
+      JUMBO_URL:      *url-jumbo
+      CHA_CHING_URL:  *url-cha-ching
+      IKKI_GRPC_ADDR: *url-ikki-grpc
       # Browser-session lifecycle webhook target (feat/browser-session-live-view):
       # ikki POSTs created/ready/cleanup here → brahmi relays over its WS to the
       # console browser viewer. Empty disables the notifier; this compose override
-      # wins over ../ikki/.env (BRAHMI_URL from *service-urls is http://brahmi:8080).
+      # wins over ../ikki/.env; the in-cluster brahmi is http://brahmi:8080.
       BRAHMI_INTERNAL_URL: http://brahmi:8080
       ENVIRONMENT: local
       # Postgres via *db-common (glafa DB_* + HAS_DB); DB_NAME drives DB creation
@@ -1297,7 +1322,7 @@ services:
     command: ["/app/broker"]
     env_file: [../louie/.env]
     environment:
-      <<: [*redis-common, *allowed-origins]
+      <<: [*redis-common, *allowed-origins, *framework]
       # Broker ports (container-internal).
       BROKER_LISTEN_ADDR: 0.0.0.0:8600
       BROKER_GRPC_PORT:   "8600"
@@ -1308,10 +1333,6 @@ services:
       # Service DNS name stands in for the pod IP — docker's embedded DNS
       # resolves it on the `clode` bridge.
       POD_IP: louie
-      # Auth issuer — swap the prod URL from ../louie/.env for the
-      # in-stack raksha so JWTs minted from raksha's dev endpoint
-      # validate here.
-      AUTH_ISSUER:        http://raksha:8080
       # HTTP proxy — wildcard subdomain routing. Shareable tunnel URLs are a
       # browser/agent/external surface, so they're always public: the broker
       # assigns `<name>.srclode.online`, served by the CF wildcard → traefik →
@@ -1409,7 +1430,12 @@ services:
     command: ["sh", "-c", "/app/cha-ching migrate && exec /app/cha-ching serve"]
     env_file: [../cha-ching/.env]
     environment:
-      <<: [*db-common, *redis-common, *service-urls, *admin-ids, *allowed-origins]
+      <<: [*db-common, *redis-common, *admin-ids, *allowed-origins, *framework]
+      RAKSHA_INTERNAL_URL: *url-raksha
+      JUMBO_INTERNAL_URL:  *url-jumbo
+      BRAHMI_URL:          *url-brahmi
+      MANG_PROXY_URL:      *url-mang-proxy
+      NOTIFY_URL:          *url-notify
       DB_NAME: chaching
       PORT: 8086
       BACKEND_URL: http://cha-ching:8086
@@ -1447,7 +1473,7 @@ services:
   # Env mirrors .infra/kustomize/overlays/dev/env-app.txt: the four
   # service URLs + AGENTID_SIGNING_KEY are fatal-if-missing at boot;
   # RAKSHA_INTERNAL_URL / BRAHMI_URL / BRAHMI_WS_URL / CHACHING_URL /
-  # AUTH_ISSUER all inherit from *service-urls.
+  # AUTH_ISSUER are set from the address book in its environment block below.
   #
   # console-web (localhost:3001) calls it cross-origin through traefik;
   # the /v1/stream WS authenticates via Authorization header or the
@@ -1460,7 +1486,12 @@ services:
       ssh: [default]
     env_file: [../aramb-gateway/.env]
     environment:
-      <<: [*service-urls, *allowed-origins]
+      <<: [*allowed-origins, *framework]
+      RAKSHA_INTERNAL_URL: *url-raksha
+      JUMBO_URL:           *url-jumbo
+      BRAHMI_URL:          *url-brahmi
+      BRAHMI_WS_URL:       *url-brahmi-ws
+      CHACHING_URL:        *url-cha-ching
       ENVIRONMENT: local
       PORT: 8080
       # HMAC key signing opaque agentId handles — gateway-internal (no
@@ -1500,7 +1531,12 @@ services:
     command: ["sh", "-c", "/app/toolkit-proxy migrate && exec /app/toolkit-proxy serve"]
     env_file: [../toolkit-proxy/.env]
     environment:
-      <<: [*db-common, *service-urls, *allowed-origins]
+      <<: [*db-common, *allowed-origins, *framework]
+      JUMBO_BASE_URL:             *url-jumbo
+      BRAHMI_BASE_URL:            *url-brahmi
+      TOOLKIT_PROXY_EXTERNAL_URL: *url-toolkit-proxy-public
+      GITANA_BASE_URL:            *url-gitana
+      NOTIFY_BASE_URL:            *url-notify
       PORT: 8080
       ENVIRONMENT: local
       HAS_DB: "true"
@@ -1555,15 +1591,14 @@ services:
     build:
       context: ${MCP_SERVER_DIR:-../mcp-server}
     environment:
-      <<: [*service-urls, *admin-ids, *allowed-origins]
+      <<: [*admin-ids, *allowed-origins, *framework]
       PORT: 3000
-      # AKELA_BASE_URL isn't in the *service-urls anchor (only mcp-server
-      # fronts akela's vault REST) — point it at the in-cluster akela.
+      # AKELA_BASE_URL isn't in the address book (only mcp-server fronts
+      # akela's vault REST) — point it at the in-cluster akela.
       AKELA_BASE_URL:    http://akela:8080
-      # x-service-urls sets AUTH_ISSUER=http://raksha:8080, which is what
-      # mcp-server's auth-verify uses as the trust root. Pin JWKS
-      # explicitly so a mis-set AUTH_ISSUER never turns into an unroutable
-      # JWKS default.
+      # AUTH_ISSUER (*url-raksha above, http://raksha:8080) is mcp-server's
+      # auth-verify trust root. Pin JWKS explicitly so a mis-set AUTH_ISSUER
+      # never turns into an unroutable JWKS default.
       AUTH_JWKS_URL:     http://raksha:8080/.well-known/jwks.json
       AUTH_TOKEN_ISSUER: http://raksha:8080
       # ARAMB_USER_ID falls back to the stdio-mode dev sub when a caller
@@ -1622,7 +1657,11 @@ services:
     command: ["/app/mang-proxy migrate || true; /app/mang-proxy load-keys --platform || true; /app/mang-proxy load-keys --platform --envKeyPrefix=K2_ || true; exec /app/mang-proxy serve"]
     env_file: [../mang-proxy/.env]
     environment:
-      <<: [*redis-common, *service-urls, *admin-ids, *databend-common]
+      <<: [*redis-common, *admin-ids, *databend-common, *framework]
+      RAKSHA_INTERNAL_URL: *url-raksha
+      JUMBO_BASE_URL:      *url-jumbo
+      JUMBO_URL:           *url-jumbo
+      CHA_CHING_URL:       *url-cha-ching
       # Logical Redis DB allocation across the stack
       # (raksha+brahmi=0, mang-proxy=1, ikki=2, vova=3).
       REDIS_DB: "1"
@@ -1662,7 +1701,8 @@ services:
     command: ["sh", "-c", "/app/skills-registry migrate && exec /app/skills-registry serve"]
     env_file: [../skills-registry/.env]
     environment:
-      <<: [*db-common, *service-urls, *admin-ids, *allowed-origins]
+      <<: [*db-common, *admin-ids, *allowed-origins, *framework]
+      SKILLS_REGISTRY_BASE_URL: *url-skills-registry
       ENVIRONMENT: local
       DB_NAME: skills_registry
       PORT: 8080
@@ -1703,12 +1743,11 @@ services:
     command: ["sh", "-c", "/app/narnia migrate && exec /app/narnia serve"]
     env_file: [../narnia/.env]
     environment:
-      <<: [*db-common, *allowed-origins]
+      <<: [*db-common, *allowed-origins, *framework]
       DB_NAME: narnia
       HOST: 0.0.0.0
       PORT: 8081
       JUMBO_BASE_URL: http://jumbo:8080
-      AUTH_ISSUER:    http://raksha:8080
     labels:
       # local-only — narnia was never CF-exposed; do not add a srclode rule.
       - traefik.enable=true

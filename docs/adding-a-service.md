@@ -68,15 +68,24 @@ automatically.
 
 ## 2. Cross-service URL (only if other services dial this one)
 
-In `docker-compose.yml`, add to the `x-service-urls:` anchor:
+In `docker-compose.yml`, add an address-book entry (one anchor per endpoint
+value, near the top):
 
 ```yaml
-<SVC>_URL: http://<svc>:8080
+x-url-<svc>: &url-<svc> http://<svc>:8080
 ```
 
-Match whatever key name the consumer service's config reads (`_BASE_URL`,
-`_EXTERNAL_URL`, etc.). The anchor is merged into every consumer's
-`environment:`, so this overrides any localhost URL their own `.env` has.
+Then, in the `environment:` of **each service that actually dials it**, add the
+var name that service's config reads (`_BASE_URL`, `_EXTERNAL_URL`, etc.),
+aliasing the entry:
+
+```yaml
+    <SVC>_BASE_URL: *url-<svc>
+```
+
+Only add it to real consumers — a service's env block should list exactly its
+cross-service dependencies, nothing more. This overrides any localhost URL that
+service's own `.env` has.
 
 ## 3. Database + seed (usually no script edit)
 

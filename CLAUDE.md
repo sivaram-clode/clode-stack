@@ -25,7 +25,7 @@ traefik:8080`). `--public` is a deprecated no-op and the
 `STACK_SCHEME/DOMAIN/PORT` interpolation is removed.
 
 URLs split **by caller, not by flag**: service↔service traffic stays
-in-cluster (`http://<svc>:<port>`, the x-service-urls anchor), and everything a
+in-cluster (`http://<svc>:<port>`, via the service address book), and everything a
 **browser or agent** touches is the public `https://<svc>.srclode.online` host
 — uniform whether the caller is on-bridge or off-cluster. srclode network
 aliases on traefik resolve the public host in-cluster too, so on-bridge callers
