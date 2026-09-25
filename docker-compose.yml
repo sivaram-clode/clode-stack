@@ -1728,34 +1728,6 @@ services:
     restart: unless-stopped
 
   # ------------------------------------------------------------------
-  # k3s — single-node Kubernetes + preinstalled ArgoCD, standing in for
-  # the prod cluster ArgoCD reconciles into. One container: k3s runs PID
-  # 1, a background init script installs ArgoCD, preseeds the admin
-  # password to a known value ("clode-local"), and exposes argocd-server
-  # as NodePort 30443. narnia-workers logs in with that password at
-  # startup and mints its own apiKey token — no shared volume, no init
-  # sidecar. The image is built from ./docker/k3s-argocd/.
-  # ------------------------------------------------------------------
-  k3s:
-    profiles: [deploy]
-    build:
-      context: ./docker/k3s-argocd
-    privileged: true
-    tmpfs:
-      - /run
-      - /var/run
-    volumes:
-      - k3s_server:/var/lib/rancher/k3s
-    networks: [clode]
-    healthcheck:
-      test: ["CMD-SHELL", "kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml get --raw=/healthz | grep -q ok"]
-      interval: 10s
-      timeout: 5s
-      retries: 30
-      start_period: 30s
-    restart: unless-stopped
-
-  # ------------------------------------------------------------------
   # narnia-workers — Temporal worker fleet (manifest-builder, argocd-
   # deployer/deleter, build-worker, aramb-pr, frontend-deploy,
   # notification-sender, hermes-worker) that drives the build/deploy
@@ -1768,31 +1740,25 @@ services:
   # so build/deploy callbacks route to in-stack jumbo+narnia rather than
   # the host loopback or the prod cluster.
   #
-  # ArgoCD wiring is local-stack specific and NOT in ../narnia-workers/.env:
-  # the bind-mounted `narnia-workers-argocd-token.sh` runs before the
-  # binary, waits for the `k3s` service's ArgoCD, logs in as admin/clode-
-  # local, mints a long-lived apiKey token, then exports ARGOCD_ADDRESS/
-  # API_KEY/PROJECT and execs ./narnia-workers. No Dockerfile edit needed —
-  # curl + node ship in the runtime image.
+  # ArgoCD wiring comes from ../narnia-workers/.env — it points at cloud
+  # ArgoCD (ARGOCD_ADDRESS/API_KEY/PROJECT), so there is no local k3s+ArgoCD
+  # container and no token-minting wrapper: the binary runs directly and reads
+  # its ArgoCD creds from .env like every other config value.
   # ------------------------------------------------------------------
   narnia-workers:
     profiles: [deploy]
     build:
       context: ${NARNIA_WORKERS_DIR:-../narnia-workers}
       ssh: [default]
-    entrypoint: ["/argocd-token.sh"]
     command: ["./narnia-workers"]
     env_file: [../narnia-workers/.env]
     environment:
       JUMBO_BASE_URL:     http://jumbo:8080
       JUMBO_EXTERNAL_URL: http://jumbo:8080
       NARNIA_BASE_URL:    http://narnia:8081
-    volumes:
-      - ./scripts/narnia-workers-argocd-token.sh:/argocd-token.sh:ro
     depends_on:
       jumbo:  { condition: service_healthy }
       narnia: { condition: service_healthy }
-      k3s:    { condition: service_healthy }
     networks: [clode]
     restart: unless-stopped
 
@@ -1983,9 +1949,6 @@ volumes:
   databend_data:
   databend_minio:
   databend_log:
-  # k3s node state (containerd, kine). Wiped on `./stack.sh wipe`, which
-  # forces a fresh ArgoCD install on the next `up`.
-  k3s_server:
   # console-web dev-server node_modules — container-native, shadows the
   # host's; populated by `bun install` on first `--profile web` up.
   console_web_node_modules:

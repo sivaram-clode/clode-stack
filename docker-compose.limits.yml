@@ -17,7 +17,6 @@ x-lim-ingress: &lim-ingress {mem_limit: 256m,  cpus: 1.0}
 x-lim-db:      &lim-db      {mem_limit: 1g,    cpus: 2.0}
 x-lim-olap:    &lim-olap    {mem_limit: 2g,    cpus: 2.0}
 x-lim-minio:   &lim-minio   {mem_limit: 1g,    cpus: 1.5}
-x-lim-k3s:     &lim-k3s     {mem_limit: 2g,    cpus: 2.0}
 x-lim-mock:    &lim-mock    {mem_limit: 256m,  cpus: 0.5}
 
 services:
@@ -27,7 +26,6 @@ services:
   minio:           {<<: *lim-minio}
   databend:        {<<: *lim-olap}
   traefik:         {<<: *lim-ingress}
-  k3s:             {<<: *lim-k3s}
   cloudflared:     {<<: *lim-mock}
 
   # UI (Vite dev server — memory-hungry, hence the wider cap)

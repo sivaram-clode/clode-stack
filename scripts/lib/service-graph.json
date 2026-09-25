@@ -193,7 +193,6 @@
   "minio-setup": {"gate": "core",     "buildable": false, "calls": {}},
   "databend":    {"gate": "core",     "buildable": false, "calls": {}},
   "traefik":     {"gate": "core",     "buildable": false, "calls": {}},
-  "k3s":         {"gate": "deploy",   "buildable": false, "calls": {}},
   "cloudflared": {"gate": "public",   "buildable": false, "calls": {}},
 
   "akela":       {"gate": "external", "buildable": false, "calls": {}},

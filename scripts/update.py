@@ -67,7 +67,7 @@ def _svc_dirs(profiles, names):
     Reads the fully-resolved compose config (build contexts absolutized) under
     the selected COMPOSE_PROFILES, preferring a service's `src` additional build
     context (console-web's SPA source) over its base context. In-repo contexts
-    (mock-services, k3s under ./docker) are dropped by the git-toplevel filter
+    (mock-services under ./docker) are dropped by the git-toplevel filter
     later; only sibling checkouts survive.
     """
     cfg = s.compose_config().get("services", {})
