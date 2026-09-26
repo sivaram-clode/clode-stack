@@ -464,6 +464,13 @@ def main(argv=None):
 
     # ── public-edge report ───────────────────────────────────────────────────
     print()
+    # What's actually running decides what gets printed (partial `up` included).
+    running = s.compose("ps", "--services", "--status", "running,restarting,created",
+                        capture=True, check=False).stdout.split()
+
+    def has(svc):
+        return svc in running
+
     # cloudflared is always on. Probe the public edge: a random subdomain falls
     # through traefik's catch-all to louie's HTTP proxy, which 404s an unknown
     # tunnel name. 530 = the CF wildcard DNS CNAME is gone (restore command in
