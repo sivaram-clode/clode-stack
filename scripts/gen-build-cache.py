@@ -39,6 +39,14 @@ _WS_DEFAULT_CTX = {
     "mock-services": "./docker/mock-services",
 }
 
+# Cap each service's in-build Go parallelism. `go build` defaults -p to GOMAXPROCS
+# = all host cores, so N concurrent builds (--batch N) each grab the whole machine
+# → ~batch×cores of demand, pinning CPU and OOM-ing the desktop. We inject
+# `ENV GOFLAGS=-p=<N> GOMAXPROCS=<N>` after each builder FROM in the GENERATED
+# Dockerfile only — upstream repos stay untouched. Tune via BUILD_GO_PARALLELISM
+# (default 4): with the default --batch 2 that's ~8 cores peak on a 12-core host.
+GO_BUILD_PARALLELISM = os.environ.get("BUILD_GO_PARALLELISM", "4").strip()
+
 
 # service name → env var name (pool-manager → POOL_MANAGER_DIR)
 def _ws_var(svc):
@@ -109,6 +117,9 @@ def inject_mounts(src, dst, seed_file="", mig_dir=""):
             out.extend(block)
         else:
             out.append(line)
+            # Cap Go build parallelism right after each golang builder stage.
+            if GO_BUILD_PARALLELISM and re.match(r'^\s*FROM\b.*\bgolang\b.*\b[Aa][Ss]\s+\S+', line):
+                out.append(f'ENV GOFLAGS="-p={GO_BUILD_PARALLELISM}" GOMAXPROCS={GO_BUILD_PARALLELISM}')
         i += 1
     if seed_block and not seed_done:
         sys.exit(f"gen-build-cache: no `go build` RUN found in {src} to anchor the seed injection")
